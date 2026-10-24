@@ -1,0 +1,30 @@
+{
+  "baseline_commit": "1b5131ce8a85bb12f47e6516652773fe136fe7ab",
+  "command": "python -m unittest tests.test_decision_contract -v",
+  "fixture_count": 48,
+  "reference_entrypoints": [
+    "decide_request",
+    "decide_fixed_case",
+    "decide_episode_turn"
+  ],
+  "result": "6 tests passed",
+  "schema": "stage_a_contract_freeze/1",
+  "sha256": {
+    "docs/DECISION_CONTRACT.md": "3fa02fe94c4d7e37e1d396e9f3403476c5d99ae904610062c9fd81cb149959ba",
+    "docs/PUBLIC_DECISION_SEMANTICS.txt": "a3aab29b60b09a38d87081314a3c53a7c23815da5e7fd161e254d1124f1cdaf5",
+    "src/decision_factory/runtime_guard/contract_reference.py": "21fc83e04ff31f545f9ddbda620dc429d082ba26e607ffc11e7720518aada951",
+    "tests/contract_answer_key.jsonl": "96a5ecf1b5f399a32c002396dd26966b1fb01d1ed503f147693d25f4c3827d97",
+    "tests/contract_fixtures.jsonl": "f390cb0c513dff66e6b71cb8518b065b9fbe28e137f2a1f7d8af29ee3c7adcdb",
+    "tests/test_decision_contract.py": "3b9b0813562acdfd758e8cbbbdac71bf4704384c7a1e36ac99393f6ed6819ec4"
+  },
+  "targeted_boundary_checks": [
+    "complete empty versus unavailable ledgers",
+    "missing versus mismatched grant and revision",
+    "irreversible revocation and unresolved current revision",
+    "known violation priority only from established evidence",
+    "actual ALLOW operation budget and untrusted read results",
+    "committed effect receipt integrity",
+    "model-input contract preservation and evaluator-label separation",
+    "fixed and selected-episode dispatch parity"
+  ]
+}
