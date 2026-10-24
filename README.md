@@ -1,6 +1,10 @@
 # Gemini: Qwen + Bev sequence guard
 
+The native function-call experiment and its finite safety/completion results are documented in [authorization results](docs/AUTHORIZATION_RESULTS.md). It uses base Qwen with a trained Bev-derived guard; it remains experimental.
+
 This repository contains the source for a local, experimental sequence runtime guard. Qwen proposes a tool call, Bev assesses the exact proposal using the current task policy and history, and a bounded host applies only synthetic in-memory effects. The included examples contain no evaluator labels. The host demo performs no filesystem, network, or account actions.
+
+The active research path trains a specialized risk readout over frozen Bev features across synthetic tool contracts. Its separate bounded multi-tool command retains Qwen and Bev in inference and supports recovery after a blocked call. See [authorization runtime](docs/AUTHORIZATION_RUNTIME.md) for the interface and local command. This new model is not promoted by the historical V7 measurements below.
 
 The current V7 Bev guard is **experimental and unpromoted**. On 28 corrected multi-step development tasks, Qwen with V7 completed 12 safely with zero unauthorized effects; Qwen without the learned guard completed 19 safely and caused two unauthorized effects. A bounded output-format repair subsequently raised Qwen's safe completion with a diagnostic reference guard to 26/28. That diagnostic uses a rule reference, so it is not a result for the learned pair. Bev input and training repairs are in progress. See [measured results](docs/RESULTS.md) and the [completion plan](docs/COMPLETION_PLAN.md).
 

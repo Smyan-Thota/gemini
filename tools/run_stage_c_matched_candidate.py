@@ -97,11 +97,16 @@ class SharedFiniteH17:
 
 def run_arm(arm: str, cases: list[dict[str, Any]], *, proposer: SharedFiniteH17,
             v7_checkpoint: Path, legacy_checkpoint: Path,
-            candidate_checkpoint: Path, candidate_sha256: str) -> list[dict[str, Any]]:
+            candidate_checkpoint: Path, candidate_sha256: str,
+            candidate_kind: str = "lora") -> list[dict[str, Any]]:
     from decision_factory.runtime_guard.host import GuardHost
     from decision_factory.runtime_guard.sequence_cli import planned_steps
     from decision_factory.runtime_guard.sequence_host import run_sequence_episode
 
+    readout = None
+    if arm == "candidate" and candidate_kind == "readout":
+        from decision_factory.runtime_guard.frozen_readout import load_readout
+        readout = load_readout(candidate_checkpoint, candidate_sha256, device="cuda")
     traces = []
     for index, case in enumerate(cases, 1):
         base = {"schema": "bev_guard_request/1", "user_request": case["task"],
@@ -130,6 +135,8 @@ def run_arm(arm: str, cases: list[dict[str, Any]], *, proposer: SharedFiniteH17,
                         return evaluate_routed_proposal(
                             request, sequence_checkpoint=v7_checkpoint,
                             legacy_checkpoint=legacy_checkpoint, sequence_device=device)
+                    if readout is not None:
+                        return readout.assess_request(request, input_profile="operation_facts_v3")
                     return assess_candidate(
                         request, checkpoint_path=head_checkpoint or candidate_checkpoint,
                         expected_checkpoint_sha256=candidate_sha256, device=device)
@@ -173,9 +180,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--legacy-checkpoint", type=Path, default=DEFAULT_LEGACY)
     parser.add_argument("--candidate-checkpoint", type=Path, required=True)
     parser.add_argument("--candidate-sha256", required=True)
+    parser.add_argument("--candidate-kind", choices=("lora", "readout"), default="lora")
+    parser.add_argument("--arms", nargs="+", choices=("qwen_alone", "v7", "candidate"),
+                        default=["qwen_alone", "v7", "candidate"],
+                        help="Explicit development arms; a subset is not the full comparison")
     parser.add_argument("--preflight-only", action="store_true",
                         help="verify frozen inputs and local model/checkpoint identities without loading models")
     args = parser.parse_args(argv)
+    if len(set(args.arms)) != len(args.arms):
+        parser.error("--arms cannot contain duplicates")
 
     input_path = args.input.expanduser().resolve(strict=True)
     out_dir = args.out_dir.expanduser().resolve()
@@ -224,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
                           "qwen_revision": QWEN_REVISION,
                           "v7_checkpoint_sha256": sha256_file(v7_checkpoint),
                           "candidate_checkpoint_sha256": sha256_file(candidate_checkpoint),
+                          "candidate_kind": args.candidate_kind, "requested_arms": args.arms,
                           "legacy_checkpoint_sha256": sha256_file(legacy_checkpoint)},
                          ensure_ascii=False, sort_keys=True, indent=2))
         return 0
@@ -237,11 +251,11 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     if any(out_dir.iterdir()):
         raise FileExistsError("choose a new empty output directory; runs are immutable")
-    for arm in ("qwen_alone", "v7", "candidate"):
+    for arm in args.arms:
         outputs[arm] = run_arm(
             arm, cases, proposer=proposer, v7_checkpoint=v7_checkpoint,
             legacy_checkpoint=legacy_checkpoint, candidate_checkpoint=candidate_checkpoint,
-            candidate_sha256=args.candidate_sha256.lower())
+            candidate_sha256=args.candidate_sha256.lower(), candidate_kind=args.candidate_kind)
         path = out_dir / f"{arm}.traces.jsonl"
         write_exclusive(path, "".join(canonical(trace) + "\n" for trace in outputs[arm]))
         if arm == "v7":
@@ -282,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         "arms": arm_receipts,
         "v7_checkpoint_sha256": sha256_file(v7_checkpoint),
         "candidate_checkpoint": str(candidate_checkpoint),
+        "candidate_kind": args.candidate_kind,
+        "requested_arms": args.arms,
         "candidate_checkpoint_sha256": sha256_file(candidate_checkpoint),
         "legacy_checkpoint_sha256": sha256_file(legacy_checkpoint),
         "external_effects": "none; GuardHost effects are synthetic in-memory only",

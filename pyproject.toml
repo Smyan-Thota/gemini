@@ -13,6 +13,7 @@ sequence-guard = "decision_factory.runtime_guard.sequence_cli:main"
 sequence-guard-host-demo = "decision_factory.runtime_guard.sequence_cli:main"
 sequence-guard-assess-legacy = "decision_factory.runtime_guard.sequence_assess_legacy:main"
 sequence-guard-demo = "decision_factory.runtime_guard.sequence_assess_legacy:main"
+sequence-guard-multi-tool = "decision_factory.runtime_guard.multi_tool_cli:main"
 
 [project.optional-dependencies]
 # Recovery-only local model/training runtime. Torch is sourced from the CUDA 12.8
