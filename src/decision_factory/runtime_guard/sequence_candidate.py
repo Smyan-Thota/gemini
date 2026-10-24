@@ -169,6 +169,81 @@ def _failure(*, request: dict[str, Any] | None, request_sha256: str | None,
     }
 
 
+def encode_candidate_input(request: dict[str, Any], decider: Any) -> dict[str, Any]:
+    """Normalize and encode one raw request exactly as candidate inference does.
+
+    This CPU-callable path is shared by model assessment and training audits.
+    In particular it retains the production normalization order: validate the
+    raw request, inject the public decision contract, then call the versioned
+    state builder (which validates and injects that contract again). Bev's
+    encoder consumes the insertion-ordered ``indent=2`` text, so callers must
+    use this helper rather than reproducing state normalization themselves.
+    """
+    clean = bev._validate_request(request)
+    clean["host_policy"]["decision_contract"] = public_decision_contract()
+    request_sha256 = hashlib.sha256(_canonical_bytes(clean)).hexdigest()
+    model_state = sequence_v2.sequence_state_v2(clean)
+    model_state_text = json.dumps(model_state, ensure_ascii=False, indent=2)
+    state_tokens = len(decider.encoder.tok.encode(model_state_text))
+    option_tokens = {key: len(decider.encoder.tok.encode(f"{key}: {description}"))
+                     for key, description in bev._CHOICE_DESCRIPTIONS.items()}
+    if state_tokens > bev.MAX_STATE_TOKENS:
+        raise CandidateAssessmentError("input_validation", "state_limit_exceeded",
+                                       "model state exceeds the encoder context bound")
+    if any(count > bev.MAX_OPTION_TOKENS for count in option_tokens.values()):
+        raise CandidateAssessmentError("input_validation", "option_limit_exceeded",
+                                       "fixed decision option exceeds the encoder context bound")
+    from bev_decider.encode import question_options
+    question = bev._QUESTION
+    rendered_options, rendered_keys = question_options(question)
+    encoded = decider.encoder.encode(model_state, question)
+    input_ids = [int(token) for token in encoded["input_ids"]]
+    if not input_ids:
+        raise CandidateAssessmentError("input_encoding", "empty_encoded_input",
+                                       "encoded request is empty")
+    input_ids_sha256 = hashlib.sha256(_canonical_bytes(input_ids)).hexdigest()
+    mask = encoded["attention_mask"].detach().cpu().contiguous()
+    mask_digest = hashlib.sha256()
+    _sha256_tensor(mask_digest, "attention_mask", mask)
+    attention_mask_sha256 = mask_digest.hexdigest()
+    encoded_input_sha256 = hashlib.sha256(_canonical_bytes({
+        "input_ids": input_ids,
+        "position_ids": [int(value) for value in encoded["position_ids"]],
+        "choice_read_idx": [int(value) for value in encoded["choice_read_idx"]],
+        "answer_end_idx": int(encoded["answer_end_idx"]),
+        "task_type": int(encoded["task_type"]),
+        "keys": list(encoded["keys"]),
+        "attention_mask_sha256": attention_mask_sha256,
+    })).hexdigest()
+    input_tokens = len(input_ids)
+    if input_tokens > bev.MAX_INPUT_TOKENS:
+        raise CandidateAssessmentError("input_validation", "input_limit_exceeded",
+                                       "encoded request exceeds the supported input length")
+    question_text = json.dumps(question, ensure_ascii=False, indent=2)
+    model_state_text_sha256 = hashlib.sha256(model_state_text.encode("utf-8")).hexdigest()
+    return {
+        "clean_request": clean,
+        "request_sha256": request_sha256,
+        "model_state": model_state,
+        "model_state_text": model_state_text,
+        "model_state_text_sha256": model_state_text_sha256,
+        "question": question,
+        "question_text": question_text,
+        "question_sha256": hashlib.sha256(question_text.encode("utf-8")).hexdigest(),
+        "rendered_options": list(rendered_options),
+        "rendered_option_keys": list(rendered_keys),
+        "options_sha256": hashlib.sha256(_canonical_bytes(rendered_options)).hexdigest(),
+        "encoded": encoded,
+        "input_ids": input_ids,
+        "input_ids_sha256": input_ids_sha256,
+        "attention_mask_sha256": attention_mask_sha256,
+        "encoded_input_sha256": encoded_input_sha256,
+        "state_tokens": state_tokens,
+        "option_tokens": option_tokens,
+        "input_tokens": input_tokens,
+    }
+
+
 def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                      expected_checkpoint_sha256: str, device: str = "cuda",
                      allow_unpromoted_v9_prior: bool = False) -> dict[str, Any]:
@@ -230,8 +305,6 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                 raise CandidateAssessmentError("checkpoint_contract", "non_fp32_checkpoint_state",
                                                f"candidate {key} must be stored in FP32")
 
-        stage, code = "state_projection", "state_projection_failure"
-        model_state = sequence_v2.sequence_state_v2(clean)
         stage, code = "input_validation", "input_limit_exceeded"
         decider, loaded_sha256 = bev._load_candidate_decider(checkpoint)
         if loaded_sha256 != expected_checkpoint_sha256:
@@ -256,42 +329,25 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
         # checkpoint, after the exact FP32 production casting path.
         network_state_sha256, frozen_backbone_sha256 = _loaded_network_digests(decider, loaded_sha256)
 
-        question = bev._QUESTION
-        question_text = json.dumps(question, ensure_ascii=False, indent=2)
-        model_state_text = json.dumps(model_state, ensure_ascii=False, indent=2)
-        state_tokens = len(decider.encoder.tok.encode(model_state_text))
-        option_tokens = {key: len(decider.encoder.tok.encode(f"{key}: {description}"))
-                         for key, description in bev._CHOICE_DESCRIPTIONS.items()}
-        if state_tokens > bev.MAX_STATE_TOKENS:
-            raise CandidateAssessmentError("input_validation", "state_limit_exceeded",
-                                           "model state exceeds the encoder context bound")
-        if any(count > bev.MAX_OPTION_TOKENS for count in option_tokens.values()):
-            raise CandidateAssessmentError("input_validation", "option_limit_exceeded",
-                                           "fixed decision option exceeds the encoder context bound")
-        from bev_decider.encode import question_options
-        rendered_options, rendered_keys = question_options(question)
-        encoded = decider.encoder.encode(model_state, question)
-        state_text_sha256 = hashlib.sha256(model_state_text.encode("utf-8")).hexdigest()
-        input_ids = [int(token) for token in encoded["input_ids"]]
-        if not input_ids:
-            raise CandidateAssessmentError("input_encoding", "empty_encoded_input", "encoded request is empty")
-        input_ids_sha256 = hashlib.sha256(_canonical_bytes(input_ids)).hexdigest()
-        mask = encoded["attention_mask"].detach().cpu().contiguous()
-        mask_digest = hashlib.sha256()
-        _sha256_tensor(mask_digest, "attention_mask", mask)
-        attention_mask_sha256 = mask_digest.hexdigest()
-        encoded_example_sha256 = hashlib.sha256(_canonical_bytes({
-            "input_ids": input_ids,
-            "position_ids": [int(value) for value in encoded["position_ids"]],
-            "choice_read_idx": [int(value) for value in encoded["choice_read_idx"]],
-            "answer_end_idx": int(encoded["answer_end_idx"]),
-            "task_type": int(encoded["task_type"]),
-            "keys": list(encoded["keys"]),
-            "attention_mask_sha256": attention_mask_sha256,
-        })).hexdigest()
-        if len(input_ids) > bev.MAX_INPUT_TOKENS:
-            raise CandidateAssessmentError("input_validation", "input_limit_exceeded",
-                                           "encoded request exceeds the supported input length")
+        stage, code = "state_projection", "state_projection_failure"
+        prepared = encode_candidate_input(request, decider)
+        clean = prepared["clean_request"]
+        request_sha256 = prepared["request_sha256"]
+        model_state = prepared["model_state"]
+        model_state_text = prepared["model_state_text"]
+        state_text_sha256 = prepared["model_state_text_sha256"]
+        question = prepared["question"]
+        question_text = prepared["question_text"]
+        rendered_options = prepared["rendered_options"]
+        rendered_keys = prepared["rendered_option_keys"]
+        encoded = prepared["encoded"]
+        input_ids = prepared["input_ids"]
+        input_ids_sha256 = prepared["input_ids_sha256"]
+        attention_mask_sha256 = prepared["attention_mask_sha256"]
+        encoded_example_sha256 = prepared["encoded_input_sha256"]
+        state_tokens = prepared["state_tokens"]
+        option_tokens = prepared["option_tokens"]
+        input_tokens = prepared["input_tokens"]
 
         stage, code = "inference", "model_inference_failure"
         old_tf32 = torch.backends.cuda.matmul.allow_tf32
@@ -365,11 +421,11 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                 "question_sha256": hashlib.sha256(question_text.encode("utf-8")).hexdigest(),
                 "rendered_option_keys": list(rendered_keys),
                 "rendered_options": list(rendered_options),
-                "options_sha256": hashlib.sha256(_canonical_bytes(rendered_options)).hexdigest(),
+                "options_sha256": prepared["options_sha256"],
                 "encoded_input_sha256": encoded_example_sha256,
                 "input_ids_sha256": input_ids_sha256,
                 "attention_mask_sha256": attention_mask_sha256,
-                "input_tokens": len(input_ids),
+                "input_tokens": input_tokens,
                 "state_tokens": state_tokens,
                 "option_tokens": option_tokens,
                 "max_state_tokens": bev.MAX_STATE_TOKENS,
