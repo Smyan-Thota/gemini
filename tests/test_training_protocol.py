@@ -64,33 +64,47 @@ class TrainingProtocolTests(unittest.TestCase):
             def __init__(self, wrapped):
                 self.wrapped = wrapped
                 self.steps = 0
+                self.gradient = None
 
             def zero_grad(self, **kwargs):
                 return self.wrapped.zero_grad(**kwargs)
 
             def step(self):
                 self.steps += 1
+                self.gradient = parameter.grad.detach().clone()
                 return self.wrapped.step()
 
         optimizer = CountingOptimizer(base_optimizer)
-        rows = [{"target": 0, "keys": ["PERMIT", "BLOCK", "REVIEW"]},
-                {"target": 1, "keys": ["PERMIT", "BLOCK", "REVIEW"]}]
-        rows.extend({"target": index % 3, "keys": ["PERMIT", "BLOCK", "REVIEW"]}
-                    for index in range(22))
+        rows = [{"target": 0, "keys": ["PERMIT", "BLOCK", "REVIEW"], "scale": 1 / 24},
+                {"target": 1, "keys": ["PERMIT", "BLOCK", "REVIEW"], "scale": 2 / 24}]
+        rows.extend({"target": index % 3, "keys": ["PERMIT", "BLOCK", "REVIEW"],
+                     "scale": index / 24}
+                    for index in range(3, 25))
         calls = []
 
         def forward_one(row):
             calls.append(row)
-            return parameter * (len(calls) / 24.0)
+            return parameter * row["scale"]
 
-        before = parameter.detach().clone()
+        reference = torch.nn.Parameter(before := parameter.detach().clone())
+        reference_logits = [reference * row["scale"] for row in rows]
+        reference_ce = sum(functional.cross_entropy(logits.unsqueeze(0),
+            torch.tensor([row["target"]])) for logits, row in zip(reference_logits, rows)) / 24
+        permit_margin = reference_logits[0][0] - reference_logits[0][1]
+        block_margin = reference_logits[1][0] - reference_logits[1][1]
+        reference_loss = reference_ce + 0.1 * functional.softplus(1.0 - (permit_margin - block_margin))
+        reference_loss.backward()
+        expected_gradient = reference.grad.detach().clone()
+
         metrics = _accumulated_optimizer_update(
             None, rows, [(0, 1)] + [(index,) for index in range(2, 24)],
             None, torch, functional, optimizer, contrast_weight=0.1,
             contrast_margin=1.0, forward_one=forward_one)
-        self.assertEqual(len(calls), 24)
+        self.assertEqual(len(calls), 26)
         self.assertEqual(optimizer.steps, 1)
         self.assertEqual(metrics["accumulated_examples"], 24.0)
+        self.assertEqual(metrics["pairwise_recompute_forward_calls"], 2.0)
+        self.assertTrue(torch.allclose(optimizer.gradient, expected_gradient, rtol=1e-6, atol=1e-7))
         self.assertFalse(torch.equal(before, parameter.detach()))
 
     def test_corrected_schedule_consumes_rows_once_in_balanced_updates(self) -> None:

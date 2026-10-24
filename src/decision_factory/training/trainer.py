@@ -321,28 +321,47 @@ def _accumulated_optimizer_update(decider: Any, rows: list[dict[str, Any]],
         if positive["target"] != positive["keys"].index("PERMIT") or \
                 negative["target"] != negative["keys"].index("BLOCK"):
             raise ValueError("paired update must be ordered PERMIT then BLOCK")
+        permit_index = positive["keys"].index("PERMIT")
+        block_index = positive["keys"].index("BLOCK")
+        # Probe the exact pair margin without an autograd graph, then re-run
+        # each singleton independently with its analytic margin-gradient term.
+        # This preserves the contrast objective while never retaining two
+        # full Bev backbone graphs simultaneously.
+        with torch.no_grad():
+            permit_probe = forward_one(positive)
+            block_probe = forward_one(negative)
+            permit_margin = permit_probe[permit_index] - permit_probe[block_index]
+            block_margin = block_probe[permit_index] - block_probe[block_index]
+            contrast = functional.softplus(contrast_margin - (permit_margin - block_margin))
+            contrast_slope = (contrast_weight / pair_count) * torch.sigmoid(
+                contrast_margin - (permit_margin - block_margin))
+        del permit_probe, block_probe, permit_margin, block_margin
+
         permit_logits = forward_one(positive)
         permit_target = torch.tensor([positive["target"]], device=permit_logits.device, dtype=torch.long)
         permit_ce = functional.cross_entropy(permit_logits.unsqueeze(0), permit_target)
-        (permit_ce / example_count).backward(retain_graph=True)
+        permit_margin = permit_logits[permit_index] - permit_logits[block_index]
+        pair_ce = float(permit_ce.detach().cpu())
+        (permit_ce / example_count - contrast_slope * permit_margin).backward()
+        del permit_logits, permit_target, permit_ce, permit_margin
+
         block_logits = forward_one(negative)
         block_target = torch.tensor([negative["target"]], device=block_logits.device, dtype=torch.long)
         block_ce = functional.cross_entropy(block_logits.unsqueeze(0), block_target)
-        (block_ce / example_count).backward(retain_graph=True)
-        permit_index = positive["keys"].index("PERMIT")
-        block_index = positive["keys"].index("BLOCK")
-        contrast = functional.softplus(
-            contrast_margin - ((permit_logits[permit_index] - permit_logits[block_index]) -
-                               (block_logits[permit_index] - block_logits[block_index])))
-        (contrast_weight * contrast / pair_count).backward()
-        ce_sum += float((permit_ce + block_ce).detach().cpu())
+        block_margin = block_logits[permit_index] - block_logits[block_index]
+        pair_ce += float(block_ce.detach().cpu())
+        (block_ce / example_count + contrast_slope * block_margin).backward()
+        ce_sum += pair_ce
         contrast_sum += float(contrast.detach().cpu())
+        del block_logits, block_target, block_ce, block_margin, contrast, contrast_slope
     optimizer.step()
     mean_ce = ce_sum / example_count
     mean_contrast = contrast_sum / pair_count if pair_count else 0.0
     return {"cross_entropy": mean_ce, "pairwise_contrast": mean_contrast,
             "total": mean_ce + contrast_weight * mean_contrast,
-            "accumulated_examples": float(example_count), "paired_units": float(pair_count)}
+            "accumulated_examples": float(example_count), "paired_units": float(pair_count),
+            "model_forward_calls": float(example_count + 2 * pair_count),
+            "pairwise_recompute_forward_calls": float(2 * pair_count)}
 
 
 def _save_step(output: Path, *, step: int, decider: Any, bev: Any, peft: Any,
@@ -737,7 +756,8 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             "optimizer_step": actual_steps, "examples_seen": actual_examples,
             "epoch": epoch, "update_kind": "singleton_forward_gradient_accumulation",
             "accumulation_examples": accumulated_examples,
-            "microbatch_forward_count": accumulated_examples,
+            "microbatch_forward_count": losses["model_forward_calls"],
+            "pairwise_recompute_forward_calls": losses["pairwise_recompute_forward_calls"],
             "training_input_sha256": input_sha, "training_token_sha256": token_sha,
             "training_request_sha256": request_sha, "training_labels_sha256": labels_sha,
             "question_sha256": question_sha,
