@@ -15,6 +15,7 @@ from decision_factory.training.protocol import (
     pair_indices,
 )
 from decision_factory.training.trainer import (
+    _evaluate_initialization,
     _input_hash_rows,
     _accumulated_optimizer_update,
     _append_evaluation_metrics,
@@ -25,6 +26,38 @@ from decision_factory.training.trainer import (
 
 
 class TrainingProtocolTests(unittest.TestCase):
+    def test_fresh_base_initialization_baseline_is_explicit_and_untrained(self) -> None:
+        from unittest.mock import patch
+        import torch
+
+        rows = []
+        labels = {}
+        for group, counts in (("old96", {"PERMIT": 32, "BLOCK": 32, "REVIEW": 32}),
+                              ("actual56", {"PERMIT": 52, "BLOCK": 4})):
+            index = 0
+            for verdict, count in counts.items():
+                for _ in range(count):
+                    sample_id = f"{group}-{index}"
+                    index += 1
+                    pair_index = index - 1 if verdict == "PERMIT" else index - 33
+                    pair_id = f"pair-{pair_index}" if group == "old96" and verdict in ("PERMIT", "BLOCK") else None
+                    rows.append({"sample_id": sample_id, "keys": [verdict],
+                                 "state_sha256": "a" * 64, "token_sha256": "b" * 64})
+                    labels[sample_id] = {"verdict": verdict, "group_id": group,
+                                         "pair_id": pair_id}
+
+        with patch("decision_factory.training.trainer._forward_one",
+                   side_effect=lambda decider, row, bev, torch_module:
+                   torch_module.tensor([1.0])) as forward:
+            result = _evaluate_initialization(rows, labels, object(), object(), torch)
+
+        self.assertEqual(forward.call_count, 152)
+        self.assertEqual(result["schema"], "decision_factory_fresh_base_initialization_baseline/1")
+        self.assertIn("pretrained_bev_base_and_choice_head", result["initialization"])
+        self.assertEqual(result["count"], 152)
+        self.assertEqual(result["correct"], 152)
+        self.assertEqual(result["pilot_metrics"]["all_gates_pass"], True)
+
     def test_evaluation_metrics_are_durably_appended_without_prediction_rows(self) -> None:
         entry = {
             "step": 16, "checkpoint": "step-000016.pt", "checkpoint_sha256": "a" * 64,

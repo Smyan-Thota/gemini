@@ -310,6 +310,27 @@ def _verify_warm_assessor_parity(row: dict[str, Any], decider: Any, bev: Any,
             "precision": evidence["precision"], "tf32": evidence["tf32"]}
 
 
+def _evaluate_initialization(rows: list[dict[str, Any]], labels: dict[str, dict[str, Any]],
+                             decider: Any, bev: Any, torch: Any) -> dict[str, Any]:
+    """Record the fresh pretrained-base + zero-start LoRA baseline before updates."""
+    predictions = []
+    for row in rows:
+        logits = _forward_one(decider, row, bev, torch)
+        prediction = row["keys"][int(logits.argmax().detach().cpu())]
+        predictions.append({"scenario_id": row["sample_id"], "prediction": prediction,
+                            "verdict": labels[row["sample_id"]]["verdict"],
+                            "group_id": labels[row["sample_id"]].get("group_id"),
+                            "pair_id": labels[row["sample_id"]].get("pair_id"),
+                            "state_sha256": row["state_sha256"],
+                            "token_sha256": row["token_sha256"]})
+    metrics = _pilot_gate_metrics(predictions)
+    return {"schema": "decision_factory_fresh_base_initialization_baseline/1",
+            "initialization": "pinned_pretrained_bev_base_and_choice_head_plus_new_zero_start_lora",
+            "assessment_path": "production encoder and in-memory singleton FP32 network; before optimizer update",
+            "count": len(rows), "correct": sum(x["prediction"] == x["verdict"] for x in predictions),
+            "pilot_metrics": metrics, "predictions": predictions}
+
+
 def _forward_one(decider: Any, row: dict[str, Any], bev: Any, torch: Any):
     # Encode afresh from the insertion-ordered production object. Frozen JSON
     # projection values are equality-audited, never used as token input.
@@ -743,6 +764,8 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
                                            input_profile=input_profile, sequence_v3=sequence_v3)
         if warm_role != "unpromoted_v9_prior":
             raise ValueError("the corrected pilot requires the exact unpromoted V9 step-64 warm prior")
+    elif config["initialize_from_base"]:
+        warm_role = "fresh_pinned_base_initialization"
     else:
         raise ValueError("the corrected pilot requires the exact unpromoted V9 step-64 warm prior")
 
@@ -750,9 +773,11 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
         bev, warm_path, torch, peft, config["learning_rate"], config["weight_decay"])
     frozen_sha = _module_tensor_sha256(decider.network.backbone)
     profile_metadata = _profile_metadata(input_profile, sequence_v2, sequence_v3, config)
-    warm_parity = _verify_warm_assessor_parity(
-        validation_rows[0], decider, bev, sequence_candidate,
-        warm_path, warm_sha, frozen_sha, input_profile=input_profile)
+    warm_parity = None
+    if warm_path is not None:
+        warm_parity = _verify_warm_assessor_parity(
+            validation_rows[0], decider, bev, sequence_candidate,
+            warm_path, warm_sha, frozen_sha, input_profile=input_profile)
     train_samples, train_state_hashes = _tokenize_rows(
         train_rows, train_targets, decider, bev, sequence_v2, sequence_candidate, source_root,
         input_profile=input_profile, sequence_v3=sequence_v3)
@@ -830,6 +855,14 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
                       ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
             stream.write("\n")
         best_selection_key = _pilot_selection_key(baseline["pilot_metrics"], 0)
+    elif warm_role == "fresh_pinned_base_initialization":
+        baseline = _evaluate_initialization(validation_samples, validation_targets,
+                                            decider, bev, torch)
+        baseline["selection_key"] = list(_pilot_selection_key(baseline["pilot_metrics"], 0))
+        with (output / "baseline-fresh-base.json").open("x", encoding="utf-8", newline="\n") as stream:
+            json.dump(baseline, stream, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+            stream.write("\n")
+        best_selection_key = _pilot_selection_key(baseline["pilot_metrics"], 0)
 
     def do_update(units: list[tuple[int, ...]], epoch: int) -> bool:
         nonlocal actual_steps, actual_examples, best_selection_key, best_observed, selected
@@ -864,6 +897,9 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             "warm_checkpoint_sha256": warm_sha,
             "warm_checkpoint_role": warm_role,
             "initialized_from_base": warm_path is None,
+            "initialization_provenance": (
+                "pinned_pretrained_base_and_choice_head; newly initialized zero-start LoRA"
+                if warm_path is None else "exact unpromoted V9 historical warm prior"),
             "input_profile": input_profile,
             **profile_metadata,
             "lora_config": lora_config, "trainable_parameter_names": trainable_names,
@@ -950,7 +986,9 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
         "training_schedule_sha256": schedule_sha,
         "training_rows": len(train_samples), "validation_rows": len(validation_samples),
         "checkpoint_count": actual_steps, "history": history, "selected": selected,
-        "best_observed": best_observed, "unpromoted_warm_baseline": baseline,
+        "best_observed": best_observed,
+        "unpromoted_warm_baseline": baseline if warm_path is not None else None,
+        "fresh_base_initialization_baseline": baseline if warm_path is None else None,
         "stop_flag_present": stop_flag.exists(), "training_input_sha256": input_sha,
         "early_stop": early_stop,
         "stop_reason": stop_reason,

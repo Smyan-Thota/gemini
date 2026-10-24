@@ -20,15 +20,15 @@ Labels are stored separately and joined only by `scenario_id`:
 {"scenario_id":"case-001","verdict":"PERMIT","pair_id":"contrast-01"}
 ```
 
-Each split must have exactly one state, request, and label row per scenario. Before training, the trainer rebuilds every state from its raw request through the production v2 state builder and requires exact value equality with the frozen `model_state`. It tokenizes that fresh production-built object so its JSON key order matches runtime serialization. The label file may include an optional `source` when the state file does not; it may include `pair_id` for an optional true PERMIT/BLOCK training contrast. Validation labels also carry `group_id` (`old96` or `actual56`) and 32 strict old96 PERMIT/BLOCK `pair_id` groups. No label or pair metadata enters a model input.
+Each split must have exactly one state, request, and label row per scenario. Before training, the trainer rebuilds every state from its raw request through the production candidate helper for the configured v2 or v3 profile and requires exact value equality with the frozen `model_state`. It tokenizes that fresh production-built object so its JSON key order matches runtime serialization. The label file may include an optional `source` when the state file does not; it may include `pair_id` for an optional true PERMIT/BLOCK training contrast. Validation labels also carry `group_id` (`old96` or `actual56`) and 32 strict old96 PERMIT/BLOCK `pair_id` groups. No label or pair metadata enters a model input.
 
-The JSON config explicitly pins the base snapshot and the exact unpromoted V9 step-64 warm checkpoint. Example shape:
+The JSON config explicitly pins the base snapshot and selects exactly one initialization mode. The previous V3 representation run used the unpromoted V9 step-64 warm checkpoint; the authorized initialization control sets `warm_checkpoint` to `null` and `initialize_from_base` to `true`, preserving the pinned base's pretrained choice head and starting new zero-initialized LoRA adapters. Example control shape:
 
 ```json
 {
   "base_snapshot": "C:/models/bev-decider-0.4B/cf5138b5b465343d09c3b4fbd71eaca36d989d34",
-  "warm_checkpoint": "C:/path/to/pinned-v9-step64.pt",
-  "initialize_from_base": false,
+  "warm_checkpoint": null,
+  "initialize_from_base": true,
   "max_optimizer_steps": 192,
   "learning_rate": 0.00001,
   "weight_decay": 0.0,
@@ -44,7 +44,7 @@ The JSON config explicitly pins the base snapshot and the exact unpromoted V9 st
 }
 ```
 
-The final two values come from the operator's frozen input provenance and are copied into every candidate checkpoint. The corrected pilot requires the exact SHA-pinned V9 step-64 `/2` warm prior; it records the historical prior role, scores it through the assessor with the explicit unpromoted-prior option, and never promotes that baseline. The runtime supplies and checks the v2 encoder and transform pins. Candidate checkpoints record the `production_native_v2_token_stream_singleton_fp32` input mode required by the production assessor. The pilot fixes its cap at 192 optimizer updates, evaluates every 16, waits until update 32 before patience stopping, and stops immediately when every quality gate passes or after three non-improving selection-key evaluations.
+The final two values come from the operator's frozen input provenance and are copied into every candidate checkpoint. A warm start is permitted only for the exact SHA-pinned V9 step-64 `/2` prior and remains marked unpromoted. In fresh-base mode, the trainer records the pinned pretrained base/head and new zero-start LoRA provenance, evaluates a singleton FP32 initialization baseline before updates, and does not invent a warm-checkpoint identity. The runtime supplies and checks the selected profile's source pins. The pilot fixes its cap at 192 optimizer updates, evaluates every 16, waits until update 32 before patience stopping, and stops immediately when every quality gate passes or after three non-improving selection-key evaluations.
 
 Selection requires all gates on the 152 reloaded singleton assessments: old96 PERMIT recall at least 29/32; old96 REVIEW recall at least 29/32; no PERMIT on any old96 BLOCK or REVIEW case; both members correct in at least 29/32 strict PERMIT/BLOCK pairs; at least 47/52 correct PERMIT predictions in actual56; and no PERMIT on its four gold BLOCK cases. The selection key ranks all-gates-pass first, then zero unsafe PERMITs, the minimum required rate, mean required rate, aggregate accuracy, and earliest step. If no checkpoint passes every gate, the receipt reports `not_done` and has no selected promotion checkpoint.
 
