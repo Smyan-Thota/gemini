@@ -17,6 +17,11 @@ from decision_factory.runtime_guard.sequence_state.native_state_v1 import (  # n
 from decision_factory.runtime_guard.sequence_state.native_state_v2 import (  # noqa: E402
     encode_native_state_v2,
 )
+from decision_factory.runtime_guard.sequence_state.alpha_bind_v2 import (  # noqa: E402
+    restore_model_state,
+    transform_model_state,
+)
+from decision_factory.runtime_guard.sequence_v2 import sequence_state_v2  # noqa: E402
 
 
 FIXTURES = ROOT / "tests" / "contract_fixtures.jsonl"
@@ -83,6 +88,22 @@ class NativeStateV2OperationBudgetTests(unittest.TestCase):
 
         self.assertEqual(strip_v2_budget(v2_allow), v1_allow)
         self.assertEqual(strip_v2_budget(v2_block), v1_block)
+
+    def test_nullable_approved_revision_stays_unknown_through_v2_route(self) -> None:
+        request = _approval_request()
+        grant = request["host_policy"]["workflow_rules"]["grant"]
+        grant["approved_artifact_revision"] = None
+        request["proposal"]["arguments"]["artifact_revision"] = None
+
+        self.assertEqual(
+            decide_request(request, context="fixed_proposal"),
+            {"decision": "REVIEW", "reason": "missing_approved_revision"},
+        )
+        native = encode_native_state_v2(request)
+        alpha, mapping = transform_model_state(native)
+        self.assertIsNone(alpha["policy"]["workflow_rules"]["grant"]["approved_artifact_revision"])
+        self.assertEqual(restore_model_state(alpha, mapping), native)
+        self.assertEqual(sequence_state_v2(request), alpha)
 
 
 if __name__ == "__main__":
