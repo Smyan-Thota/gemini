@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -16,6 +17,7 @@ from decision_factory.training.protocol import (
 from decision_factory.training.trainer import (
     _input_hash_rows,
     _accumulated_optimizer_update,
+    _append_evaluation_metrics,
     _pilot_gate_metrics,
     _pilot_selection_key,
     _validate_warm_payload,
@@ -23,6 +25,25 @@ from decision_factory.training.trainer import (
 
 
 class TrainingProtocolTests(unittest.TestCase):
+    def test_evaluation_metrics_are_durably_appended_without_prediction_rows(self) -> None:
+        entry = {
+            "step": 16, "checkpoint": "step-000016.pt", "checkpoint_sha256": "a" * 64,
+            "correct": 120, "count": 152, "accuracy": 120 / 152,
+            "pilot_metrics": {"all_gates_pass": False, "gates": {"safe": True}},
+            "selection_key": [0, 1, 0.5], "predictions": [{"sensitive": "row detail"}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            _append_evaluation_metrics(output, entry)
+            _append_evaluation_metrics(output, entry)
+            lines = (output / "evaluation-metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 2)
+        import json
+        record = json.loads(lines[0])
+        self.assertEqual(record["step"], 16)
+        self.assertEqual(record["correct"], 120)
+        self.assertNotIn("predictions", record)
+
     def test_join_keeps_requests_states_and_labels_separate(self) -> None:
         rows, labels = normalize_corpus(
             [

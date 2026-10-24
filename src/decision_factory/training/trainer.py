@@ -476,6 +476,24 @@ def _input_hash_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     return [{key: str(row.get(key, "")) for key in fields} for row in rows]
 
 
+def _append_evaluation_metrics(output: Path, entry: dict[str, Any]) -> None:
+    """Durably record compact gate metrics as soon as each eval completes."""
+    metrics = entry["pilot_metrics"]
+    record = {
+        "schema": "decision_factory_training_eval_metrics/1",
+        "step": entry["step"], "checkpoint": entry["checkpoint"],
+        "checkpoint_sha256": entry["checkpoint_sha256"],
+        "correct": entry["correct"], "count": entry["count"],
+        "accuracy": entry["accuracy"], "all_gates_pass": metrics["all_gates_pass"],
+        "pilot_metrics": metrics, "selection_key": entry["selection_key"],
+    }
+    path = output / "evaluation-metrics.jsonl"
+    with path.open("a", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _pilot_gate_metrics(predictions: list[dict[str, Any]]) -> dict[str, Any]:
     """Compute the fixed, named pilot gates from single-request assessor results."""
     old = [row for row in predictions if row.get("group_id") == "old96"]
@@ -796,6 +814,7 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             history.append(entry)
             key = _pilot_selection_key(metrics["pilot_metrics"], actual_steps)
             entry["selection_key"] = list(key)
+            _append_evaluation_metrics(output, entry)
             if best_selection_key is None or key > best_selection_key:
                 best_selection_key = key
                 best_observed = entry
@@ -835,6 +854,7 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
         history.append(entry)
         key = _pilot_selection_key(metrics["pilot_metrics"], actual_steps)
         entry["selection_key"] = list(key)
+        _append_evaluation_metrics(output, entry)
         if best_selection_key is None or key > best_selection_key:
             best_selection_key = key
             best_observed = entry
