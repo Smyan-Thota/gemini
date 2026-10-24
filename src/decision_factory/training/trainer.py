@@ -189,25 +189,22 @@ def _load_model(bev: Any, warm_checkpoint: Path | None, torch: Any, peft: Any,
 
 def _tokenize_rows(rows: list[dict[str, Any]], labels: dict[str, dict[str, Any]],
                    decider: Any, bev: Any, sequence_v2: Any,
+                   sequence_candidate: Any,
                    source_root: Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
     samples: list[dict[str, Any]] = []
     state_hashes: dict[str, str] = {}
     for row in rows:
-        # Equality audits the operator's stored values; the freshly built
-        # production object below retains its insertion order for tokenization.
-        state = sequence_v2.sequence_state_v2(row["request"])
+        # The runtime assessor owns normalization order and exact serialization.
+        # Use its shared CPU helper; the frozen JSON row is a value audit only.
+        prepared = sequence_candidate.encode_candidate_input(row["request"], decider)
+        state = prepared["model_state"]
         if state != row["state"]:
             raise ValueError(f"frozen state differs from production projection for {row['sample_id']!r}")
         if state.get("schema") != "sequence_guard_native_state_alpha/2":
             raise ValueError(f"unsupported model state schema for {row['sample_id']!r}")
         state_hash = sha256_json(state)
         state_hashes[row["sample_id"]] = state_hash
-        state_text = json.dumps(state, ensure_ascii=False, indent=2)
-        try:
-            bev._measure_tokens(decider, state)
-        except Exception as exc:
-            raise ValueError(f"state/token bounds failed for {row['sample_id']!r}") from exc
-        encoded = decider.encoder.encode(state, bev._QUESTION)
+        encoded = prepared["encoded"]
         sample = dict(row)
         # Keep only the production-built object. Encoded attention matrices
         # are large; retain hashes, then rebuild the singleton encoding at use.
@@ -217,14 +214,68 @@ def _tokenize_rows(rows: list[dict[str, Any]], labels: dict[str, dict[str, Any]]
         sample["pair_id"] = labels[row["sample_id"]].get("pair_id")
         sample["label_sha256"] = sha256_json(labels[row["sample_id"]])
         sample["state_sha256"] = state_hash
-        sample["state_text_sha256"] = sha256_bytes(state_text.encode("utf-8"))
+        sample["state_text_sha256"] = prepared["model_state_text_sha256"]
+        sample["question_sha256"] = prepared["question_sha256"]
+        sample["options_sha256"] = prepared["options_sha256"]
         token_hashes = _hash_example(encoded)
+        if (token_hashes["encoded_sha256"] != prepared["encoded_input_sha256"]
+                or token_hashes["input_ids_sha256"] != prepared["input_ids_sha256"]
+                or token_hashes["attention_mask_sha256"] != prepared["attention_mask_sha256"]):
+            raise RuntimeError(f"shared production input fingerprint mismatch for {row['sample_id']!r}")
         sample["token_sha256"] = token_hashes["encoded_sha256"]
         sample.update(token_hashes)
         sample["request_sha256"] = sha256_json(row["request"])
         sample["target"] = encoded["keys"].index(labels[row["sample_id"]]["verdict"])
         samples.append(sample)
     return samples, state_hashes
+
+
+def _verify_warm_assessor_parity(row: dict[str, Any], decider: Any, bev: Any,
+                                 sequence_candidate: Any, warm_path: Path,
+                                 warm_sha: str, frozen_sha: str) -> dict[str, Any]:
+    """Check one shared-helper fingerprint against the reloaded warm assessor."""
+    prepared = sequence_candidate.encode_candidate_input(row["request"], decider)
+    if prepared["model_state"] != row["state"]:
+        raise RuntimeError("warm assessor representative differs from frozen state values")
+    token_hashes = _hash_example(prepared["encoded"])
+    if (prepared["encoded_input_sha256"] != token_hashes["encoded_sha256"]
+            or prepared["input_ids_sha256"] != token_hashes["input_ids_sha256"]
+            or prepared["attention_mask_sha256"] != token_hashes["attention_mask_sha256"]):
+        raise RuntimeError("shared helper encoded fingerprint disagrees with its tensors")
+    result = sequence_candidate.assess_candidate(
+        row["request"], checkpoint_path=warm_path,
+        expected_checkpoint_sha256=warm_sha, device="cuda",
+        allow_unpromoted_v9_prior=True)
+    if result.get("status") != "assessed":
+        raise RuntimeError("warm assessor representative did not complete")
+    evidence = result.get("evidence", {})
+    expected = {
+        "checkpoint_sha256": warm_sha,
+        "frozen_backbone_state_sha256": frozen_sha,
+        "model_state_sha256": sha256_json(prepared["model_state"]),
+        "model_state_text": prepared["model_state_text"],
+        "model_state_text_sha256": prepared["model_state_text_sha256"],
+        "question_sha256": prepared["question_sha256"],
+        "options_sha256": prepared["options_sha256"],
+        "encoded_input_sha256": prepared["encoded_input_sha256"],
+        "input_ids_sha256": prepared["input_ids_sha256"],
+        "attention_mask_sha256": prepared["attention_mask_sha256"],
+        "inference_batch_size": 1, "precision": "fp32", "tf32": False,
+    }
+    mismatches = [key for key, value in expected.items() if evidence.get(key) != value]
+    if mismatches:
+        raise RuntimeError("warm assessor input fingerprint mismatch: " + ", ".join(mismatches))
+    return {"scenario_id": row["sample_id"],
+            "request_sha256": prepared["request_sha256"],
+            "model_state_text_sha256": prepared["model_state_text_sha256"],
+            "encoded_input_sha256": prepared["encoded_input_sha256"],
+            "input_ids_sha256": prepared["input_ids_sha256"],
+            "attention_mask_sha256": prepared["attention_mask_sha256"],
+            "question_sha256": prepared["question_sha256"],
+            "options_sha256": prepared["options_sha256"],
+            "checkpoint_sha256": warm_sha,
+            "batch_size": evidence["inference_batch_size"],
+            "precision": evidence["precision"], "tf32": evidence["tf32"]}
 
 
 def _forward_one(decider: Any, row: dict[str, Any], bev: Any, torch: Any):
@@ -349,9 +400,6 @@ def _evaluate_reloaded(rows: list[dict[str, Any]], labels: dict[str, dict[str, A
     correct = 0
     predictions = []
     for row in rows:
-        state = sequence_v2.sequence_state_v2(row["request"])
-        if state != row["state"]:
-            raise ValueError(f"validation state differs from production projection for {row['sample_id']!r}")
         result = sequence_candidate.assess_candidate(
             row["request"], checkpoint_path=checkpoint,
             expected_checkpoint_sha256=checkpoint_sha, device="cuda",
@@ -363,13 +411,13 @@ def _evaluate_reloaded(rows: list[dict[str, Any]], labels: dict[str, dict[str, A
             raise RuntimeError("production candidate assessor loaded a different checkpoint")
         if evidence.get("frozen_backbone_state_sha256") != expected_frozen_sha:
             raise RuntimeError("reloaded candidate changed frozen base weights or buffers")
-        if evidence.get("model_state_sha256") != sha256_json(state):
+        if evidence.get("model_state_sha256") != row["state_sha256"]:
             raise RuntimeError("production assessor evaluated a different model state")
         if evidence.get("model_state_text_sha256") != row["state_text_sha256"]:
             raise RuntimeError("production assessor serialized the model state differently")
-        if evidence.get("question_sha256") != sha256_json(bev._QUESTION):
+        if evidence.get("question_sha256") != row["question_sha256"]:
             raise RuntimeError("production assessor used a different question")
-        if evidence.get("options_sha256") != sha256_json(bev._QUESTION.get("criteria")):
+        if evidence.get("options_sha256") != row["options_sha256"]:
             raise RuntimeError("production assessor used different decision options")
         token_hashes = row
         if (evidence.get("encoded_input_sha256") != token_hashes["encoded_sha256"]
@@ -384,7 +432,7 @@ def _evaluate_reloaded(rows: list[dict[str, Any]], labels: dict[str, dict[str, A
         predictions.append({"scenario_id": row["sample_id"], "prediction": prediction,
                             "verdict": expected, "group_id": labels[row["sample_id"]].get("group_id"),
                             "pair_id": labels[row["sample_id"]].get("pair_id"),
-                            "state_sha256": sha256_json(state),
+                            "state_sha256": row["state_sha256"],
                             "token_sha256": row["token_sha256"],
                             "input_ids_sha256": row["input_ids_sha256"],
                             "attention_mask_sha256": row["attention_mask_sha256"]})
@@ -404,7 +452,8 @@ def _evaluate_reloaded(rows: list[dict[str, Any]], labels: dict[str, dict[str, A
 def _input_hash_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Bounded provenance only: no dense attention tensors survive token audit."""
     fields = ("sample_id", "source", "state_sha256", "state_text_sha256", "request_sha256",
-              "label_sha256", "encoded_sha256", "input_ids_sha256", "attention_mask_sha256")
+              "label_sha256", "encoded_sha256", "input_ids_sha256", "attention_mask_sha256",
+              "question_sha256", "options_sha256")
     return [{key: str(row.get(key, "")) for key in fields} for row in rows]
 
 
@@ -593,10 +642,13 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
     decider, optimizer, lora_config, trainable_names = _load_model(
         bev, warm_path, torch, peft, config["learning_rate"], config["weight_decay"])
     frozen_sha = _module_tensor_sha256(decider.network.backbone)
+    warm_parity = _verify_warm_assessor_parity(
+        validation_rows[0], decider, bev, sequence_candidate,
+        warm_path, warm_sha, frozen_sha)
     train_samples, train_state_hashes = _tokenize_rows(
-        train_rows, train_targets, decider, bev, sequence_v2, source_root)
+        train_rows, train_targets, decider, bev, sequence_v2, sequence_candidate, source_root)
     validation_samples, validation_state_hashes = _tokenize_rows(
-        validation_rows, validation_targets, decider, bev, sequence_v2, source_root)
+        validation_rows, validation_targets, decider, bev, sequence_v2, sequence_candidate, source_root)
     # Resolve and audit the full runtime plus the vendored v2 projection once
     # before any optimizer update begins.
     assert_gemini_module_origins(source_root)
@@ -636,10 +688,11 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
     preflight_loss.backward()
     preflight = {"scenario_id": preflight_row["sample_id"],
                  "loss": float(preflight_loss.detach().cpu()), "forward_count": 1,
-                 "optimizer_step": False}
+                 "optimizer_step": False, "warm_assessor_parity": warm_parity}
     optimizer.zero_grad(set_to_none=True)
     del preflight_logits, preflight_loss, preflight_target
-    question_sha = sha256_json(bev._QUESTION)
+    question_sha = train_samples[0]["question_sha256"]
+    options_sha = train_samples[0]["options_sha256"]
     input_sha = sha256_json(sorted((key, value) for key, value in train_state_hashes.items()))
     token_sha = sha256_json(sorted((row["sample_id"], row["token_sha256"]) for row in train_samples))
     request_sha = sha256_json(sorted((row["sample_id"], row["request_sha256"]) for row in train_samples))
@@ -688,6 +741,7 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             "training_input_sha256": input_sha, "training_token_sha256": token_sha,
             "training_request_sha256": request_sha, "training_labels_sha256": labels_sha,
             "question_sha256": question_sha,
+            "options_sha256": options_sha,
             "validation_state_sha256": sha256_json(sorted(validation_state_hashes.items())),
             "validation_token_sha256": sha256_json(sorted((row["sample_id"], row["token_sha256"])
                                                             for row in validation_samples)),
@@ -705,6 +759,7 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             "model_state_independent_audit_sha256": config["model_state_independent_audit_sha256"].lower(),
             "training_input_mode": TRAINING_INPUT_MODE,
             "lora_config": lora_config, "trainable_parameter_names": trainable_names,
+            "warm_assessor_parity": warm_parity,
             "precision": "FP32 training and evaluation; CUDA TF32 disabled",
             "microbatch_size": 1, "optimizer_gradient_accumulation_examples": 24,
             "source_update_counts": source_update_counts,

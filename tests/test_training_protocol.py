@@ -129,10 +129,12 @@ class TrainingProtocolTests(unittest.TestCase):
             "request_sha256": "c" * 64, "label_sha256": "0" * 64,
             "encoded_sha256": "d" * 64,
             "input_ids_sha256": "e" * 64, "attention_mask_sha256": "f" * 64,
+            "question_sha256": "1" * 64, "options_sha256": "2" * 64,
         }])
         self.assertEqual(set(rows[0]), {
             "sample_id", "source", "state_sha256", "state_text_sha256", "request_sha256",
             "label_sha256", "encoded_sha256", "input_ids_sha256", "attention_mask_sha256",
+            "question_sha256", "options_sha256",
         })
         self.assertNotIn("attention_matrix", rows[0])
 
