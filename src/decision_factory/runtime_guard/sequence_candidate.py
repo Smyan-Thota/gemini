@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import gc
 from pathlib import Path
 import re
 import time
@@ -401,3 +402,48 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                     requested_device=device if isinstance(device, str) else "invalid",
                     effective_device=effective_device, failure_stage=stage,
                     error_code=code, error=error)
+
+
+def release_candidate_cache(checkpoint_path: str | Path, *,
+                            expected_checkpoint_sha256: str,
+                            preserve_network: Any = None) -> dict[str, Any]:
+    """Release an assessor-loaded CUDA network after a completed evaluation.
+
+    Training-time selection keeps its training model resident. Passing that
+    exact network makes this helper a safe no-op when the requested checkpoint
+    is the warm-start checkpoint currently being optimized. Callers must ensure
+    no assessment using this cache entry is in flight while releasing it.
+    """
+    if not _valid_sha(expected_checkpoint_sha256):
+        raise ValueError("expected checkpoint SHA256 must be 64 hexadecimal characters")
+    checkpoint = Path(checkpoint_path).expanduser().resolve(strict=True)
+    actual = _sha256_file(checkpoint)
+    expected = expected_checkpoint_sha256.lower()
+    if actual != expected:
+        raise ValueError("checkpoint does not match expected SHA256")
+
+    cached = bev._candidate_deciders.get(actual)
+    if cached is None:
+        return {"status": "not_cached", "checkpoint_sha256": actual,
+                "released": False, "preserved_training_model": False}
+    if preserve_network is not None and getattr(cached, "network", None) is preserve_network:
+        return {"status": "preserved_training_model", "checkpoint_sha256": actual,
+                "released": False, "preserved_training_model": True}
+
+    if bev._candidate_deciders.get(actual) is cached:
+        del bev._candidate_deciders[actual]
+    network = getattr(cached, "network", None)
+    if network is not None:
+        network.to(device="cpu")
+    del cached
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        # Cache cleanup is best-effort after the CPU move; it must not alter
+        # or reinterpret the assessment that has already completed.
+        pass
+    return {"status": "released", "checkpoint_sha256": actual,
+            "released": True, "preserved_training_model": False}

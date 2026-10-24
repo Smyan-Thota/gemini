@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -14,6 +18,7 @@ from decision_factory.runtime_guard.sequence_candidate import (  # noqa: E402
     CandidateAssessmentError,
     _validate_checkpoint_metadata,
     assess_candidate,
+    release_candidate_cache,
 )
 
 
@@ -55,6 +60,14 @@ def _request() -> dict:
 
 
 class SequenceCandidateContractTests(unittest.TestCase):
+    def setUp(self):
+        self._candidate_cache = dict(bev._candidate_deciders)
+        bev._candidate_deciders.clear()
+
+    def tearDown(self):
+        bev._candidate_deciders.clear()
+        bev._candidate_deciders.update(self._candidate_cache)
+
     def test_standard_alpha_v2_candidate_metadata_is_strict(self):
         payload = _payload()
         metadata, role, eligible = _validate_checkpoint_metadata(
@@ -106,6 +119,35 @@ class SequenceCandidateContractTests(unittest.TestCase):
         self.assertEqual(evidence["requested_device"], "cpu")
         self.assertIsNone(evidence["effective_device"])
         self.assertIsNotNone(evidence["request_sha256"])
+
+    def test_cache_release_preserves_training_network_and_evicts_eval_network(self):
+        class Network:
+            def __init__(self):
+                self.devices = []
+
+            def to(self, *, device):
+                self.devices.append(device)
+                return self
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "candidate.pt"
+            path.write_bytes(b"candidate")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            training_network = Network()
+            bev._candidate_deciders[digest] = SimpleNamespace(network=training_network)
+            retained = release_candidate_cache(path, expected_checkpoint_sha256=digest,
+                                               preserve_network=training_network)
+            self.assertEqual(retained["status"], "preserved_training_model")
+            self.assertEqual(training_network.devices, [])
+            self.assertIn(digest, bev._candidate_deciders)
+
+            eval_network = Network()
+            bev._candidate_deciders[digest] = SimpleNamespace(network=eval_network)
+            with patch("torch.cuda.is_available", return_value=False):
+                released = release_candidate_cache(path, expected_checkpoint_sha256=digest)
+            self.assertEqual(released["status"], "released")
+            self.assertEqual(eval_network.devices, ["cpu"])
+            self.assertNotIn(digest, bev._candidate_deciders)
 
 
 if __name__ == "__main__":
