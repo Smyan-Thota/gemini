@@ -15,7 +15,7 @@ from . import bev
 from .host import public_decision_contract
 
 _STATE_DIR = Path(__file__).with_name("sequence_state")
-NATIVE_STATE_V2_SHA256 = "897fa703dc51a40027fadd70c41becd06e0af0faaead88f6b4e31b3e18b03239f"
+NATIVE_STATE_V2_SHA256 = "897fa703dc51a40027fad70c41becd06e0af0faeaad88f6b4e31b3e18b03239f"
 ALPHA_BIND_V2_SHA256 = "7d345e4cbe6f519544d8e54251534c7d71ec98dbcc65f37e7acaa76bcb95e34f"
 NATIVE_STATE_V1_SHA256 = "72271c9f99fbaef120279b7ce80753850c6a1650f54423dfc7fb622cb0588b2d"
 ALPHA_BIND_V1_SHA256 = "a5acc677620e49e2255915425b30d35c8b3fca639ac4baf22f9c5565534727e6"
