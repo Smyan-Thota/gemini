@@ -66,7 +66,9 @@ def planned_steps(case: dict[str, Any], requested: int | None) -> int:
 
 
 def run_case(case: dict[str, Any], *, proposer: Any, sequence_checkpoint: Path,
-             legacy_checkpoint: Path, max_steps: int | None = None) -> dict[str, Any]:
+             legacy_checkpoint: Path, max_steps: int | None = None,
+             candidate_checkpoint_sha256: str | None = None,
+             allow_unpromoted_v9_prior: bool = False) -> dict[str, Any]:
     from .host import GuardHost
     from .sequence import evaluate_routed_proposal
     from .sequence_host import run_sequence_episode
@@ -82,6 +84,17 @@ def run_case(case: dict[str, Any], *, proposer: Any, sequence_checkpoint: Path,
 
     def assess(request: dict[str, Any], *, device: str = "cuda",
                head_checkpoint: str | Path | None = None) -> dict[str, Any]:
+        if (candidate_checkpoint_sha256 is not None
+                and isinstance(request.get("host_policy"), dict)
+                and "workflow_rules" in request["host_policy"]):
+            from .sequence_candidate import assess_candidate
+            return assess_candidate(
+                request,
+                checkpoint_path=head_checkpoint or sequence_checkpoint,
+                expected_checkpoint_sha256=candidate_checkpoint_sha256,
+                device=device,
+                allow_unpromoted_v9_prior=allow_unpromoted_v9_prior,
+            )
         return evaluate_routed_proposal(
             request,
             sequence_checkpoint=head_checkpoint or sequence_checkpoint,
@@ -114,6 +127,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bev-device", choices=("cuda",), default="cuda",
                         help="sequence Bev is supported only on CUDA FP32")
     parser.add_argument("--sequence-checkpoint", type=Path, default=DEFAULT_SEQUENCE_CHECKPOINT)
+    parser.add_argument("--candidate-checkpoint", type=Path,
+                        help="opt in to an alpha-v2 candidate instead of the default frozen V7")
+    parser.add_argument("--candidate-checkpoint-sha256",
+                        help="required operator-pinned SHA256 for --candidate-checkpoint")
+    parser.add_argument("--allow-unpromoted-v9-prior", action="store_true",
+                        help="allow only the exact V9 step-64 artifact as a diagnostic warm-start prior")
     parser.add_argument("--legacy-checkpoint", type=Path, default=DEFAULT_LEGACY_CHECKPOINT)
     parser.add_argument("--max-steps", type=int,
                         help="maximum Qwen decisions per episode; default is bounded by host policy")
@@ -121,7 +140,13 @@ def main(argv: list[str] | None = None) -> int:
     source = args.input.expanduser().resolve(strict=True)
     output = args.out.expanduser().resolve()
     qwen_base = args.qwen_base.expanduser().resolve(strict=True)
-    sequence_checkpoint = args.sequence_checkpoint.expanduser().resolve(strict=True)
+    if (args.candidate_checkpoint is None) != (args.candidate_checkpoint_sha256 is None):
+        raise ValueError("--candidate-checkpoint and --candidate-checkpoint-sha256 must be supplied together")
+    candidate_mode = args.candidate_checkpoint is not None
+    if args.allow_unpromoted_v9_prior and not candidate_mode:
+        raise ValueError("--allow-unpromoted-v9-prior requires --candidate-checkpoint")
+    sequence_checkpoint = (args.candidate_checkpoint if candidate_mode else args.sequence_checkpoint)
+    sequence_checkpoint = sequence_checkpoint.expanduser().resolve(strict=True)
     legacy_checkpoint = args.legacy_checkpoint.expanduser().resolve(strict=True)
     if output.exists() or output.with_suffix(output.suffix + ".receipt.json").exists():
         raise FileExistsError("trace or receipt already exists; choose a new output path")
@@ -140,7 +165,16 @@ def main(argv: list[str] | None = None) -> int:
     from decision_factory.runtime_guard.qwen import QwenProposer
     from decision_factory.runtime_guard.sequence import SEQUENCE_CHECKPOINT_SHA256
 
-    if sha256_file(sequence_checkpoint) != SEQUENCE_CHECKPOINT_SHA256:
+    if candidate_mode:
+        if not isinstance(args.candidate_checkpoint_sha256, str) or len(args.candidate_checkpoint_sha256) != 64:
+            raise ValueError("candidate SHA256 must contain exactly 64 hexadecimal characters")
+        try:
+            int(args.candidate_checkpoint_sha256, 16)
+        except ValueError as exc:
+            raise ValueError("candidate SHA256 must contain exactly 64 hexadecimal characters") from exc
+        if sha256_file(sequence_checkpoint) != args.candidate_checkpoint_sha256.lower():
+            raise ValueError("candidate checkpoint does not match --candidate-checkpoint-sha256")
+    elif sha256_file(sequence_checkpoint) != SEQUENCE_CHECKPOINT_SHA256:
         raise RuntimeError("sequence checkpoint hash differs from the source-pinned checkpoint")
     proposer = QwenProposer(DEFAULT_ADAPTER, device=args.qwen_device, base_model_path=qwen_base,
                             proposal_mode=args.qwen_proposal_mode)
@@ -153,7 +187,10 @@ def main(argv: list[str] | None = None) -> int:
     for index, case in enumerate(cases, 1):
         case_steps = planned_steps(case, args.max_steps)
         trace = run_case(case, proposer=proposer, sequence_checkpoint=sequence_checkpoint,
-                         legacy_checkpoint=legacy_checkpoint, max_steps=case_steps)
+                         legacy_checkpoint=legacy_checkpoint, max_steps=case_steps,
+                         candidate_checkpoint_sha256=(args.candidate_checkpoint_sha256.lower()
+                                                      if candidate_mode else None),
+                         allow_unpromoted_v9_prior=args.allow_unpromoted_v9_prior)
         traces.append(trace)
         steps_by_case.append(case_steps)
         print(f"{index}/{len(cases)} {trace['case_id']} terminal={trace['terminal']} "
@@ -161,10 +198,20 @@ def main(argv: list[str] | None = None) -> int:
     output.write_text("".join(json.dumps(row, ensure_ascii=False, sort_keys=True,
                                           separators=(",", ":"), allow_nan=False) + "\n"
                                 for row in traces), encoding="utf-8")
+    source_import_names = (
+        "decision_factory.runtime_guard.sequence_cli",
+        "decision_factory.runtime_guard.sequence_host",
+        "decision_factory.runtime_guard.host",
+        "decision_factory.runtime_guard.sequence",
+        "decision_factory.runtime_guard.qwen",
+    )
+    if candidate_mode:
+        source_import_names += ("decision_factory.runtime_guard.sequence_candidate",)
     receipt = {
         "schema": "sequence_guard_run_receipt/2",
         "status": "complete",
-        "profile": "routed_sequence_cuda_fp32_with_legacy_v4_cpu",
+        "profile": ("routed_operator_pinned_candidate_cuda_fp32_singleton_with_legacy_v4_cpu"
+                    if candidate_mode else "routed_sequence_cuda_fp32_with_legacy_v4_cpu"),
         "profile_counts": {profile_name: sum(
             1 for trace in traces if trace.get("guard_profile") == profile_name)
             for profile_name in ("sequence", "legacy_v4_cpu")},
@@ -185,13 +232,13 @@ def main(argv: list[str] | None = None) -> int:
                 "legacy_checkpoint": str(legacy_checkpoint),
                 "legacy_checkpoint_sha256": sha256_file(legacy_checkpoint),
                 "profile": "sequence_cuda_fp32", "requested_device": args.bev_device,
-                "effective_device": "cuda", "precision": "fp32"},
-        "source_imports": {name: str(Path(sys.modules[name].__file__).resolve()) for name in (
-            "decision_factory.runtime_guard.sequence_cli",
-            "decision_factory.runtime_guard.sequence_host",
-            "decision_factory.runtime_guard.host",
-            "decision_factory.runtime_guard.sequence",
-            "decision_factory.runtime_guard.qwen")},
+                "effective_device": "cuda", "precision": "fp32",
+                "candidate_mode": candidate_mode,
+                "allow_unpromoted_v9_prior": args.allow_unpromoted_v9_prior,
+                "operator_expected_sha256": (args.candidate_checkpoint_sha256.lower()
+                                              if candidate_mode else None)},
+        "source_imports": {name: str(Path(sys.modules[name].__file__).resolve())
+                           for name in source_import_names if name in sys.modules},
         "python": sys.version, "platform": platform.platform(),
         "wall_seconds": round(time.perf_counter() - started, 3),
         "external_effects": "none; host effects are in-memory synthetic state only",
