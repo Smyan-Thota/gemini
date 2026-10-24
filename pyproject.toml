@@ -9,8 +9,10 @@ requires-python = ">=3.13"
 dependencies = []
 
 [project.scripts]
-sequence-guard-demo = "decision_factory.runtime_guard.sequence_cli:main"
-sequence-guard-host-demo = "decision_factory.runtime_guard.sequence_host_demo:main"
+sequence-guard = "decision_factory.runtime_guard.sequence_cli:main"
+sequence-guard-host-demo = "decision_factory.runtime_guard.sequence_cli:main"
+sequence-guard-assess-legacy = "decision_factory.runtime_guard.sequence_assess_legacy:main"
+sequence-guard-demo = "decision_factory.runtime_guard.sequence_assess_legacy:main"
 
 [project.optional-dependencies]
 # Recovery-only local model/training runtime. Torch is sourced from the CUDA 12.8

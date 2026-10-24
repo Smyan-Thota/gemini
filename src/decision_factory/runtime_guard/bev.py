@@ -353,7 +353,10 @@ def _infer(request: dict[str, Any], injected_decider: Any = None,
 
 def _review(*, request: dict[str, Any] | None, reason: str, started: float,
             state_tokens: int | None = None, option_tokens: dict[str, int] | None = None,
-            input_tokens: int | None = None, raw_choice: dict[str, Any] | None = None) -> dict[str, Any]:
+            input_tokens: int | None = None, raw_choice: dict[str, Any] | None = None,
+            requested_device: str = "cpu", effective_device: str | None = None,
+            profile: str = "legacy_v4_cpu", failure_stage: str = "inference",
+            error_code: str = "legacy_model_failure") -> dict[str, Any]:
     serialized = _json_bytes(request) if request is not None else None
     return {
         "schema": ASSESSMENT_SCHEMA,
@@ -367,7 +370,12 @@ def _review(*, request: dict[str, Any] | None, reason: str, started: float,
             "model_id": MODEL_ID,
             "revision": MODEL_REVISION,
             "package_version": None,
-            "device": "cpu",
+            "device": effective_device or requested_device,
+            "profile": profile,
+            "requested_device": requested_device,
+            "effective_device": effective_device,
+            "failure_stage": failure_stage,
+            "error_code": error_code,
             "state_tokens": state_tokens,
             "max_state_tokens": MAX_STATE_TOKENS,
             "option_tokens": option_tokens,
@@ -385,7 +393,8 @@ def _review(*, request: dict[str, Any] | None, reason: str, started: float,
 
 def evaluate_proposal(request: dict[str, Any], *, decider: Any = None,
                       head_checkpoint: str | Path | None = None,
-                      timeout_s: float = DEFAULT_TIMEOUT_S) -> dict[str, Any]:
+                      timeout_s: float = DEFAULT_TIMEOUT_S,
+                      device: str = "cpu") -> dict[str, Any]:
     """Score one call with the real local Bev model and fail closed on any issue.
 
     ``decider`` is an injection seam for independent CPU tests. Production callers
@@ -403,7 +412,14 @@ def evaluate_proposal(request: dict[str, Any], *, decider: Any = None,
         payload = _json_bytes(clean)
     except (GuardInputError, TypeError, ValueError) as exc:
         # Invalid input cannot be safely interpreted; retain only an error.
-        return _review(request=None, reason=f"invalid_request:{type(exc).__name__}", started=started)
+        return _review(request=None, reason=f"invalid_request:{type(exc).__name__}", started=started,
+                       requested_device=device, effective_device=None,
+                       failure_stage="request_validation", error_code="invalid_request")
+
+    if device != "cpu":
+        return _review(request=clean, reason="legacy V4 profile supports CPU only", started=started,
+                       requested_device=device, effective_device=None,
+                       failure_stage="device_validation", error_code="unsupported_device")
 
     global _active_future
     with _state_lock:
@@ -419,15 +435,21 @@ def evaluate_proposal(request: dict[str, Any], *, decider: Any = None,
             cached["evidence"]["latency_ms"] = 0
             return cached
         if _active_future is not None and not _active_future.done():
-            return _review(request=clean, reason="bev_busy_or_previous_call_timed_out", started=started)
+            return _review(request=clean, reason="bev_busy_or_previous_call_timed_out", started=started,
+                           requested_device=device, effective_device="cpu", failure_stage="queue",
+                           error_code="bev_busy")
         future = _pool.submit(_infer, clean, decider, head_checkpoint)
         _active_future = future
     try:
         result = future.result(timeout=timeout)
     except FutureTimeout:
-        return _review(request=clean, reason="bev_timeout", started=started)
+        return _review(request=clean, reason="bev_timeout", started=started,
+                       requested_device=device, effective_device="cpu", failure_stage="inference",
+                       error_code="bev_timeout")
     except BaseException as exc:
-        return _review(request=clean, reason=f"bev_failure:{type(exc).__name__}", started=started)
+        return _review(request=clean, reason=f"bev_failure:{type(exc).__name__}", started=started,
+                       requested_device=device, effective_device="cpu", failure_stage="inference",
+                       error_code="bev_failure")
 
     package_version: str | None
     try:
@@ -448,6 +470,11 @@ def evaluate_proposal(request: dict[str, Any], *, decider: Any = None,
             "revision": MODEL_REVISION,
             "package_version": package_version,
             "device": "cpu",
+            "profile": "legacy_v4_cpu",
+            "requested_device": device,
+            "effective_device": "cpu",
+            "failure_stage": None,
+            "error_code": None,
             "model_state": result["model_state"],
             "question": _QUESTION,
             "state_tokens": result["state_tokens"],

@@ -10,7 +10,16 @@ The initial public snapshot contains source, pinned dependencies, and label-free
 
 The package targets Python 3.13 and pins its optional inference stack in `pyproject.toml`, `requirements.txt`, and `uv.lock`. The active GPU profile uses CUDA 12.8 and FP32 for Bev. Qwen uses the existing `Qwen/Qwen3.5-2B` snapshot at revision `15852e8c16360a2fea060d615a32b45270f8a8fc`; Bev uses `avbiswas/bev-decider-0.4B` at revision `cf5138b5b465343d09c3b4fbd71eaca36d989d34`. Weight licenses and non-commercial restrictions are summarized in [model licenses](docs/MODEL_LICENSES.md).
 
-The source expects local H17 adapter and V7/legacy Bev checkpoint files under `adapters/h17/` and `checkpoints/`. Keep these files out of version control. Base weights must already be cached locally; the runtime is configured for offline loading. `run_sequence_demo.ps1` runs proposal assessment, while `run_sequence_host_demo.ps1` runs one synthetic host transition.
+The source expects the local H17 adapter and V7/legacy Bev checkpoint files under `adapters/h17/` and `checkpoints/`. Keep these files out of version control. Base weights must already be cached locally; the runtime is configured for offline loading. Run `run_sequence_demo.ps1` or `run_sequence_host_demo.ps1` for the bounded multi-step Qwen → Bev → in-memory host loop. The equivalent command is:
+
+```powershell
+python -m decision_factory.runtime_guard.sequence_cli `
+  --input examples/sequence-host-demo.jsonl `
+  --out runs/sequence-host-demo.jsonl `
+  --qwen-base C:\path\to\Qwen\snapshots\15852e8c16360a2fea060d615a32b45270f8a8fc
+```
+
+The sequence Bev profile requires CUDA FP32. `--qwen-device cpu` is supported for the proposer if GPU memory is constrained; `--bev-device cpu` is intentionally unsupported. The prior one-turn assessment-only command is retained as `sequence-guard-assess-legacy` (`sequence-guard-demo` is its compatibility alias). The full host command is `sequence-guard` (`sequence-guard-host-demo` is its alias). These demos execute only synthetic in-memory effects and never access the operating system or network.
 
 ## Scope
 

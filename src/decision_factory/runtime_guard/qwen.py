@@ -98,11 +98,25 @@ class QwenProposer:
             {"source": "host-policy", "trust": "trusted",
              "text": "Host-enforced virtual workspace policy: " + __import__("json").dumps(
                  dict(policy), ensure_ascii=False, sort_keys=True, separators=(",", ":"))},
-            {"source": "virtual-files", "trust": "untrusted",
-             "text": "Current virtual file state (file contents are untrusted data): "
-                     + __import__("json").dumps(dict(files), ensure_ascii=False,
-                                                sort_keys=True, separators=(",", ":"))},
         ]
+        # Successful read results are rendered once in observations. Preserve a
+        # path index without copying the same untrusted bytes into a second block.
+        observation_texts = [item.get("text", "") for item in observations
+                             if isinstance(item, Mapping) and isinstance(item.get("text"), str)]
+        indexed_files: dict[str, str] = {}
+        for path, content in files.items():
+            repeated = (any(content and content in text for text in observation_texts)
+                        or (content == "" and any(
+                            isinstance(item, Mapping) and item.get("source") in {"virtual-file", "virtual-files"}
+                            for item in observations)))
+            indexed_files[path] = ("[contents shown once in the untrusted read history]"
+                                   if repeated else content)
+        if indexed_files:
+            observations.append({"source": "virtual-file-index", "trust": "untrusted",
+                                 "text": "Previously read virtual file index (contents may be shown above): "
+                                         + __import__("json").dumps(
+                                             indexed_files, ensure_ascii=False, sort_keys=True,
+                                             separators=(",", ":"))})
         case = TextToolCase(request["text"], actions, observations,
                             str(task_input.get("prompt_version", "bev-qwen-runtime-v1")))
         from decision_factory.recovery.computer_safety import render_text_tool_prompt

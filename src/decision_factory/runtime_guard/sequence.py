@@ -14,6 +14,7 @@ import time
 from typing import Any
 
 from . import bev
+from .host import public_decision_contract
 
 SEQUENCE_CHECKPOINT_SHA256 = "57492578fee9ca6cc1d31b0c1a18900e95581d670ab7b4d1a6322b7b88523edf"
 LEGACY_V4_CHECKPOINT_SHA256 = "c6c480488f93c1bb09ab2b1c94a75aba0f787d4b4187ba004630d700fa786527"
@@ -69,6 +70,7 @@ def _load_projection():
 def sequence_state(request: dict[str, Any]) -> dict[str, Any]:
     """Build the exact alpha-bound state expected by the frozen V7 adapter."""
     clean = bev._validate_request(request)
+    clean["host_policy"]["decision_contract"] = public_decision_contract()
     rules = clean["host_policy"].get("workflow_rules")
     if not isinstance(rules, dict) or rules.get("rule_type") not in SUPPORTED_RULE_TYPES:
         raise ValueError("unsupported sequence workflow rule")
@@ -98,22 +100,39 @@ def sequence_state(request: dict[str, Any]) -> dict[str, Any]:
 
 def evaluate_sequence_proposal(request: dict[str, Any], *,
                                head_checkpoint: str | Path = _CANDIDATE_PATH,
-                               device: str = "cpu") -> dict[str, Any]:
-    """Evaluate a supported sequence request; any failure yields REVIEW."""
+                               device: str = "cuda") -> dict[str, Any]:
+    """Assess a sequence call using CUDA FP32; all errors fail closed to REVIEW."""
     started = time.perf_counter()
+    clean = None
+    effective_device = None
+    checkpoint_sha = None
+    stage = "request_validation"
+    error_code = "invalid_request"
     try:
         clean = bev._validate_request(request)
         rules = clean["host_policy"].get("workflow_rules")
         if not isinstance(rules, dict) or rules.get("rule_type") not in SUPPORTED_RULE_TYPES:
+            stage, error_code = "request_validation", "unsupported_workflow_rule"
             raise bev.GuardInputError("unsupported sequence workflow rule")
-        checkpoint = Path(head_checkpoint).expanduser().resolve(strict=True)
-        if _sha256_file(checkpoint) != SEQUENCE_CHECKPOINT_SHA256:
-            raise RuntimeError("sequence checkpoint hash mismatch")
-        if device not in ("cpu", "cuda"):
-            raise bev.GuardInputError("sequence device must be cpu or cuda")
+        if device != "cuda":
+            stage, error_code = "device_validation", "unsupported_device"
+            raise bev.GuardInputError("the sequence Bev profile supports CUDA FP32 only")
+        stage, error_code = "device_validation", "cuda_unavailable"
         import torch
-        if device == "cuda" and not torch.cuda.is_available():
+        if not torch.cuda.is_available():
             raise RuntimeError("CUDA requested for the sequence guard but is unavailable")
+        effective_device = "cuda"
+        stage, error_code = "request_contract", "decision_contract_unavailable"
+        clean["host_policy"]["decision_contract"] = public_decision_contract()
+        payload_bytes = bev._json_bytes(clean)
+        request_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+        stage, error_code = "checkpoint_validation", "checkpoint_unavailable"
+        checkpoint = Path(head_checkpoint).expanduser().resolve(strict=True)
+        stage, error_code = "checkpoint_validation", "checkpoint_hash_mismatch"
+        checkpoint_sha = _sha256_file(checkpoint)
+        if checkpoint_sha != SEQUENCE_CHECKPOINT_SHA256:
+            raise RuntimeError("sequence checkpoint hash mismatch")
+        stage, error_code = "checkpoint_contract", "checkpoint_contract_mismatch"
         payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
         expected_metadata = {
             "training_input_mode": "stored_alpha_bound_state_no_runtime_retransform",
@@ -123,15 +142,20 @@ def evaluate_sequence_proposal(request: dict[str, Any], *,
         }
         if any(payload.get(key) != value for key, value in expected_metadata.items()):
             raise RuntimeError("sequence checkpoint input contract mismatch")
+        stage, error_code = "state_projection", "state_projection_failure"
         model_state = sequence_state(clean)
+        stage, error_code = "model_load", "model_load_failure"
         decider, checkpoint_sha = bev._load_candidate_decider(checkpoint)
         if decider.device.type != device:
             decider.network.to(torch.device(device))
             decider.device = torch.device(device)
             decider.precision = "fp32"
             decider.network.eval()
+        stage, error_code = "input_validation", "input_limit_exceeded"
         state_tokens, option_tokens, input_tokens = bev._measure_tokens(decider, model_state)
+        stage, error_code = "inference", "model_inference_failure"
         raw = decider.decide(model_state, {"guard": bev._QUESTION})["guard"]
+        stage, error_code = "output_validation", "invalid_model_output"
         if not isinstance(raw, dict) or raw.get("type") != "choice":
             raise RuntimeError("Bev returned a malformed sequence choice")
         selected = raw.get("choice")
@@ -145,27 +169,63 @@ def evaluate_sequence_proposal(request: dict[str, Any], *,
             "schema": bev.ASSESSMENT_SCHEMA, "status": "assessed", "disposition": selected,
             "scores": scores, "selected": selected,
             "evidence": {
-                "request": clean, "request_sha256": hashlib.sha256(bev._json_bytes(clean)).hexdigest(),
+                "request": clean, "request_sha256": request_sha256,
                 "model_id": bev.MODEL_ID, "revision": bev.MODEL_REVISION,
                 "package_version": bev.version("bev-decider"), "device": device,
+                "profile": "sequence_cuda_fp32", "requested_device": device,
+                "effective_device": effective_device, "failure_stage": None,
+                "error_code": None,
                 "model_state": model_state, "question": bev._QUESTION,
                 "state_tokens": state_tokens, "max_state_tokens": bev.MAX_STATE_TOKENS,
                 "option_tokens": option_tokens, "max_option_tokens": bev.MAX_OPTION_TOKENS,
                 "input_tokens": input_tokens, "max_input_tokens": bev.MAX_INPUT_TOKENS,
                 "latency_ms": max(0, int((time.perf_counter() - started) * 1000)),
                 "cache_hit": False, "model_latency_ms": max(0, int((time.perf_counter() - started) * 1000)),
-                "raw_choice": raw, "head_checkpoint_sha256": checkpoint_sha,
+            "raw_choice": raw, "head_checkpoint_sha256": checkpoint_sha,
                 "input_transform_sha256": ALPHA_TRANSFORM_SHA256, "error": None,
             },
         }
     except Exception as exc:
-        return bev._review(request=None, reason=f"sequence_guard_failure:{type(exc).__name__}", started=started)
+        if clean is not None:
+            clean = json.loads(bev._json_bytes(clean).decode("utf-8"))
+            if stage not in {"device_validation"}:
+                try:
+                    clean["host_policy"]["decision_contract"] = public_decision_contract()
+                except Exception:
+                    pass
+        else:
+            try:
+                clean = bev._validate_request(request)
+            except Exception:
+                clean = None
+        serialized = None
+        if clean is not None:
+            try:
+                serialized = bev._json_bytes(clean)
+            except Exception:
+                pass
+        evidence_request_hash = hashlib.sha256(serialized).hexdigest() if serialized is not None else None
+        return {
+            "schema": bev.ASSESSMENT_SCHEMA, "status": "review", "disposition": "REVIEW",
+            "scores": {key: None for key in bev.CHOICES}, "selected": None,
+            "evidence": {
+                "request": clean, "request_sha256": evidence_request_hash,
+                "model_id": bev.MODEL_ID, "revision": bev.MODEL_REVISION,
+                "profile": "sequence_cuda_fp32", "device": effective_device or device,
+                "requested_device": device, "effective_device": effective_device,
+                "head_checkpoint_sha256": checkpoint_sha, "input_transform_sha256": ALPHA_TRANSFORM_SHA256,
+                "failure_stage": stage, "error_code": error_code,
+                "error": f"{error_code}: {type(exc).__name__}: {exc}",
+                "latency_ms": max(0, int((time.perf_counter() - started) * 1000)),
+                "cache_hit": False, "model_latency_ms": None,
+            },
+        }
 
 
 def evaluate_routed_proposal(request: dict[str, Any], *,
                              sequence_checkpoint: str | Path = _CANDIDATE_PATH,
                              legacy_checkpoint: str | Path = _LEGACY_V4_PATH,
-                             sequence_device: str = "cpu") -> dict[str, Any]:
+                             sequence_device: str = "cuda") -> dict[str, Any]:
     """Route four known public workflows to V7; retain the legacy V4 path otherwise.
 
     Missing workflow metadata is the established legacy contract. Present but
@@ -177,10 +237,20 @@ def evaluate_routed_proposal(request: dict[str, Any], *,
         return bev.evaluate_proposal(request, head_checkpoint=legacy_checkpoint)
     policy = clean.get("host_policy", {})
     if "workflow_rules" not in policy:
-        if _sha256_file(Path(legacy_checkpoint).expanduser().resolve(strict=True)) != LEGACY_V4_CHECKPOINT_SHA256:
-            return bev._review(request=None, reason="legacy_v4_checkpoint_hash_mismatch", started=time.perf_counter())
-        return bev.evaluate_proposal(clean, head_checkpoint=legacy_checkpoint)
+        try:
+            legacy_sha = _sha256_file(Path(legacy_checkpoint).expanduser().resolve(strict=True))
+        except Exception:
+            return bev._review(request=clean, reason="legacy_v4_checkpoint_unavailable",
+                               started=time.perf_counter(), requested_device="cpu",
+                               effective_device=None, profile="legacy_v4_cpu",
+                               failure_stage="checkpoint_validation", error_code="checkpoint_unavailable")
+        if legacy_sha != LEGACY_V4_CHECKPOINT_SHA256:
+            return bev._review(request=clean, reason="legacy_v4_checkpoint_hash_mismatch",
+                               started=time.perf_counter(), requested_device="cpu",
+                               effective_device=None, profile="legacy_v4_cpu",
+                               failure_stage="checkpoint_validation", error_code="checkpoint_hash_mismatch")
+        return bev.evaluate_proposal(clean, head_checkpoint=legacy_checkpoint, device="cpu")
     rules = policy.get("workflow_rules")
     if not isinstance(rules, dict) or rules.get("rule_type") not in SUPPORTED_RULE_TYPES:
-        return bev._review(request=clean, reason="unsupported_sequence_workflow_rule", started=time.perf_counter())
+        return evaluate_sequence_proposal(clean, head_checkpoint=sequence_checkpoint, device=sequence_device)
     return evaluate_sequence_proposal(clean, head_checkpoint=sequence_checkpoint, device=sequence_device)
