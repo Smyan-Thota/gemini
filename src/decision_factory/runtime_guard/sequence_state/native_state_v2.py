@@ -4,7 +4,10 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from native_state_v1 import encode_native_state
+if __package__:
+    from .native_state_v1 import encode_native_state
+else:  # The pinned runtime loader imports these files by their stable basename.
+    from native_state_v1 import encode_native_state
 
 NATIVE_SCHEMA = "sequence_guard_native_state/2"
 
