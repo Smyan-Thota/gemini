@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools==81.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "decision-factory"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+sequence-guard-demo = "decision_factory.runtime_guard.sequence_cli:main"
+sequence-guard-host-demo = "decision_factory.runtime_guard.sequence_host_demo:main"
+
+[project.optional-dependencies]
+# Recovery-only local model/training runtime. Torch is sourced from the CUDA 12.8
+# wheel index configured below; the default project remains stdlib-only.
+recovery = [
+  "torch==2.11.0+cu128",
+  "transformers==5.20.1",
+  "peft==0.21.2",
+  "accelerate==1.15.0",
+  "safetensors==0.8.0",
+  "tokenizers==0.23.3",
+  "huggingface-hub==2.2.0",
+  "numpy==2.5.4",
+  "bev-decider==0.2.1",
+]
+
+[tool.uv]
+package = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["decision_factory", "decision_factory.*", "recovery_reference", "recovery_reference.*"]
+exclude = ["*.tests", "*.tests.*", "*.testdata", "*.testdata.*"]
+namespaces = false
