@@ -16,14 +16,18 @@ import re
 import time
 from typing import Any, Mapping
 
-from . import bev, sequence_v2
+from . import bev, sequence_v2, sequence_v3
 from .host import public_decision_contract
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TRAINING_INPUT_MODE = "production_native_v2_token_stream_singleton_fp32"
+_V3_TRAINING_INPUT_MODE = "production_operation_facts_v3_token_stream_singleton_fp32"
+_V3_TRAINING_CONTRACT = "sequence-guard-v3-compact-operation-facts-v3-representation-ablation"
 _ALPHA_STATE_SCHEMA = "sequence_guard_native_state_alpha/2"
+_V3_ALPHA_STATE_SCHEMA = "sequence_guard_operation_facts_alpha/3"
 _CANDIDATE_SCHEMA = "bev_lora_head_checkpoint/2"
+_V3_CONTRACT_SHA256 = "5f6db91e4a51c5650897a7307ab4eb235d2dcb770896a313de7e8a7d4bb4612f"
 _V9_PRIOR_SHA256 = "ec3b8ef8fddc4b5560e25149e5d0c98999b6046e58c187e116cf26bc8aeab7c2"
 _V9_PRIOR_MANIFEST_SHA256 = "254026dbcc2f8118d78e44c6dbaf5957bb10315f392416e02a131799a6a82359"
 _V9_PRIOR_CONTRACT = "sequence-guard-v9-native-v2-full-depth-balanced-source-sequence-only"
@@ -91,7 +95,8 @@ def _valid_sha(value: Any) -> bool:
 
 
 def _validate_checkpoint_metadata(payload: Any, *, checkpoint_sha256: str,
-                                  allow_unpromoted_v9_prior: bool) -> tuple[dict[str, Any], str, bool]:
+                                  allow_unpromoted_v9_prior: bool,
+                                  input_profile: str = "native_v2") -> tuple[dict[str, Any], str, bool]:
     if not isinstance(payload, dict) or payload.get("schema") != _CANDIDATE_SCHEMA:
         raise CandidateAssessmentError("checkpoint_contract", "unsupported_checkpoint_schema",
                                        "candidate must use bev_lora_head_checkpoint/2")
@@ -103,6 +108,9 @@ def _validate_checkpoint_metadata(payload: Any, *, checkpoint_sha256: str,
     if any(payload.get(key) != value for key, value in expected_base.items()):
         raise CandidateAssessmentError("checkpoint_contract", "base_model_mismatch",
                                        "candidate is not bound to the pinned Bev base")
+    if input_profile not in {"native_v2", "operation_facts_v3"}:
+        raise CandidateAssessmentError("checkpoint_contract", "unsupported_input_profile",
+                                       "input profile must be native_v2 or operation_facts_v3")
     is_v9_prior = (allow_unpromoted_v9_prior and checkpoint_sha256 == _V9_PRIOR_SHA256)
     if is_v9_prior:
         if (payload.get("training_input_mode") != "stored_alpha_v2_state_no_runtime_retransform"
@@ -111,19 +119,40 @@ def _validate_checkpoint_metadata(payload: Any, *, checkpoint_sha256: str,
                 or payload.get("model_state_independent_audit_sha256") is not None):
             raise CandidateAssessmentError("checkpoint_contract", "v9_prior_metadata_mismatch",
                                            "the pinned V9 prior metadata does not match its historical receipt")
-    elif payload.get("training_input_mode") != _TRAINING_INPUT_MODE:
+    elif input_profile == "native_v2" and payload.get("training_input_mode") != _TRAINING_INPUT_MODE:
         raise CandidateAssessmentError("checkpoint_contract", "input_mode_mismatch",
                                        "candidate must use production-native v2 singleton FP32 input serialization")
-    if payload.get("model_state_schema") != _ALPHA_STATE_SCHEMA:
+    elif (input_profile == "operation_facts_v3"
+          and payload.get("training_input_mode") != _V3_TRAINING_INPUT_MODE):
+        raise CandidateAssessmentError("checkpoint_contract", "input_mode_mismatch",
+                                       "candidate must use operation-facts v3 singleton FP32 serialization")
+    expected_state_schema = (_ALPHA_STATE_SCHEMA if input_profile == "native_v2" or is_v9_prior
+                             else _V3_ALPHA_STATE_SCHEMA)
+    if payload.get("model_state_schema") != expected_state_schema:
         raise CandidateAssessmentError("checkpoint_contract", "model_state_schema_mismatch",
-                                       "candidate must be trained on sequence_guard_native_state_alpha/2")
-    if (not is_v9_prior
-            and payload.get("model_state_encoder_sha256") != sequence_v2.NATIVE_STATE_V2_SHA256):
+                                       f"candidate must use {expected_state_schema}")
+    expected_encoder_sha = (sequence_v2.NATIVE_STATE_V2_SHA256
+                            if input_profile == "native_v2" or is_v9_prior
+                            else sequence_v3.source_pins()["operation_facts_v3_sha256"])
+    expected_transform_sha = (sequence_v2.ALPHA_BIND_V2_SHA256
+                              if input_profile == "native_v2" or is_v9_prior
+                              else sequence_v3.source_pins()["alpha_bind_operation_facts_v3_sha256"])
+    if not is_v9_prior and payload.get("model_state_encoder_sha256") != expected_encoder_sha:
         raise CandidateAssessmentError("checkpoint_contract", "native_encoder_mismatch",
-                                       "candidate native-state encoder pin does not match runtime")
-    if payload.get("model_state_transform_sha256") != sequence_v2.ALPHA_BIND_V2_SHA256:
+                                       "candidate model-state encoder pin does not match runtime")
+    if payload.get("model_state_transform_sha256") != expected_transform_sha:
         raise CandidateAssessmentError("checkpoint_contract", "alpha_transform_mismatch",
                                        "candidate alpha-binding transform pin does not match runtime")
+    if input_profile == "operation_facts_v3" and not is_v9_prior:
+        if payload.get("candidate_training_contract") != _V3_TRAINING_CONTRACT:
+            raise CandidateAssessmentError("checkpoint_contract", "training_contract_mismatch",
+                                           "candidate training contract does not match operation-facts v3")
+        if payload.get("model_state_alpha_base_sha256") != sequence_v3.source_pins()["alpha_bind_v1_sha256"]:
+            raise CandidateAssessmentError("checkpoint_contract", "alpha_base_mismatch",
+                                           "candidate base alpha-bijection pin does not match runtime")
+        if payload.get("model_state_contract_sha256") != _V3_CONTRACT_SHA256:
+            raise CandidateAssessmentError("checkpoint_contract", "feature_contract_mismatch",
+                                           "candidate feature contract does not match frozen v3 contract")
     if not is_v9_prior:
         for field in ("model_state_manifest_sha256", "model_state_independent_audit_sha256"):
             if not _valid_sha(payload.get(field)):
@@ -169,7 +198,8 @@ def _failure(*, request: dict[str, Any] | None, request_sha256: str | None,
     }
 
 
-def encode_candidate_input(request: dict[str, Any], decider: Any) -> dict[str, Any]:
+def encode_candidate_input(request: dict[str, Any], decider: Any, *,
+                           input_profile: str = "native_v2") -> dict[str, Any]:
     """Normalize and encode one raw request exactly as candidate inference does.
 
     This CPU-callable path is shared by model assessment and training audits.
@@ -182,7 +212,13 @@ def encode_candidate_input(request: dict[str, Any], decider: Any) -> dict[str, A
     clean = bev._validate_request(request)
     clean["host_policy"]["decision_contract"] = public_decision_contract()
     request_sha256 = hashlib.sha256(_canonical_bytes(clean)).hexdigest()
-    model_state = sequence_v2.sequence_state_v2(clean)
+    if input_profile == "native_v2":
+        model_state = sequence_v2.sequence_state_v2(clean)
+    elif input_profile == "operation_facts_v3":
+        model_state = sequence_v3.sequence_state_v3(clean)
+    else:
+        raise CandidateAssessmentError("input_validation", "unsupported_input_profile",
+                                       "input profile must be native_v2 or operation_facts_v3")
     model_state_text = json.dumps(model_state, ensure_ascii=False, indent=2)
     state_tokens = len(decider.encoder.tok.encode(model_state_text))
     option_tokens = {key: len(decider.encoder.tok.encode(f"{key}: {description}"))
@@ -225,6 +261,7 @@ def encode_candidate_input(request: dict[str, Any], decider: Any) -> dict[str, A
         "clean_request": clean,
         "request_sha256": request_sha256,
         "model_state": model_state,
+        "input_profile": input_profile,
         "model_state_text": model_state_text,
         "model_state_text_sha256": model_state_text_sha256,
         "question": question,
@@ -246,7 +283,8 @@ def encode_candidate_input(request: dict[str, Any], decider: Any) -> dict[str, A
 
 def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                      expected_checkpoint_sha256: str, device: str = "cuda",
-                     allow_unpromoted_v9_prior: bool = False) -> dict[str, Any]:
+                     allow_unpromoted_v9_prior: bool = False,
+                     input_profile: str = "native_v2") -> dict[str, Any]:
     """Assess one request with an explicitly SHA-pinned alpha-v2 candidate.
 
     No candidate path or digest is implicit. CPU is rejected before checkpoint
@@ -294,7 +332,8 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
             raise CandidateAssessmentError(stage, code, f"safe checkpoint read failed: {type(exc).__name__}") from exc
         metadata, checkpoint_role, promotion_eligible = _validate_checkpoint_metadata(
             payload, checkpoint_sha256=actual_sha256,
-            allow_unpromoted_v9_prior=allow_unpromoted_v9_prior)
+            allow_unpromoted_v9_prior=allow_unpromoted_v9_prior,
+            input_profile=input_profile)
         for key in ("lora_state_dict", "head_state_dict"):
             state_dict = payload.get(key)
             if not isinstance(state_dict, dict) or not state_dict:
@@ -330,7 +369,7 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
         network_state_sha256, frozen_backbone_sha256 = _loaded_network_digests(decider, loaded_sha256)
 
         stage, code = "state_projection", "state_projection_failure"
-        prepared = encode_candidate_input(request, decider)
+        prepared = encode_candidate_input(request, decider, input_profile=input_profile)
         clean = prepared["clean_request"]
         request_sha256 = prepared["request_sha256"]
         model_state = prepared["model_state"]
@@ -379,6 +418,7 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
         selected = max(encoded["keys"], key=lambda key: scores[key])
         elapsed = max(0, int((time.perf_counter() - started) * 1000))
         source_hash = _sha256_file(Path(__file__).resolve())
+        source_pins = (sequence_v3.source_pins() if input_profile == "operation_facts_v3" else None)
         return {
             "schema": bev.ASSESSMENT_SCHEMA,
             "status": "assessed",
@@ -392,7 +432,8 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                 "revision": bev.MODEL_REVISION,
                 "base_weight_sha256": bev.MODEL_SHA256,
                 "package_version": bev.version("bev-decider"),
-                "profile": "sequence_candidate_cuda_fp32_singleton",
+                "profile": ("sequence_candidate_cuda_fp32_singleton" if input_profile == "native_v2"
+                            else "sequence_candidate_operation_facts_v3_cuda_fp32_singleton"),
                 "requested_device": device,
                 "effective_device": "cuda",
                 "precision": "fp32",
@@ -407,11 +448,14 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                 "training_input_mode": metadata.get("training_input_mode"),
                 "selected_step": metadata["selected_step"],
                 "model_state_schema": metadata["model_state_schema"],
+                "model_state_profile": input_profile,
                 "model_state_encoder_sha256": metadata.get("model_state_encoder_sha256"),
                 "runtime_native_encoder_sha256": sequence_v2.NATIVE_STATE_V2_SHA256,
                 "model_state_transform_sha256": metadata["model_state_transform_sha256"],
                 "model_state_manifest_sha256": metadata["model_state_manifest_sha256"],
                 "model_state_independent_audit_sha256": metadata["model_state_independent_audit_sha256"],
+                "model_state_contract_sha256": metadata.get("model_state_contract_sha256"),
+                "model_state_alpha_base_sha256": metadata.get("model_state_alpha_base_sha256"),
                 "loaded_network_state_sha256": network_state_sha256,
                 "frozen_backbone_state_sha256": frozen_backbone_sha256,
                 "model_state_sha256": hashlib.sha256(_canonical_bytes(model_state)).hexdigest(),
@@ -431,9 +475,13 @@ def assess_candidate(request: dict[str, Any], *, checkpoint_path: str | Path,
                 "max_state_tokens": bev.MAX_STATE_TOKENS,
                 "max_input_tokens": bev.MAX_INPUT_TOKENS,
                 "candidate_assessor_sha256": source_hash,
-                "sequence_v2_source_sha256": _sha256_file(Path(sequence_v2.__file__).resolve()),
-                "native_encoder_sha256": sequence_v2.NATIVE_STATE_V2_SHA256,
-                "alpha_transform_sha256": sequence_v2.ALPHA_BIND_V2_SHA256,
+                "sequence_v2_source_sha256": (_sha256_file(Path(sequence_v2.__file__).resolve())
+                                               if input_profile == "native_v2" else None),
+                "native_encoder_sha256": (sequence_v2.NATIVE_STATE_V2_SHA256 if input_profile == "native_v2"
+                                           else source_pins["operation_facts_v3_sha256"]),
+                "alpha_transform_sha256": (sequence_v2.ALPHA_BIND_V2_SHA256 if input_profile == "native_v2"
+                                            else source_pins["alpha_bind_operation_facts_v3_sha256"]),
+                "alpha_base_sha256": (None if source_pins is None else source_pins["alpha_bind_v1_sha256"]),
                 "failure_stage": None,
                 "error_code": None,
                 "error": None,
