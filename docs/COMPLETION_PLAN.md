@@ -24,3 +24,11 @@ V7 is experimental and unpromoted. Its fixed-proposal development accuracy was 9
 ## Completion rule
 
 The task is complete only when the source package runs both models through the same multi-step host path used for evaluation, all declared development and fresh-final gates pass, results and licenses are documented accurately, and the public source matches the accepted package. A successful first action or a single demo does not meet this bar.
+
+## Corrected training pilot
+
+The next pilot fixes two measured input differences: padding across examples changed Bev decisions, and JSON key order changed the token stream even when state values matched. Training must therefore rebuild the production state from each raw request and use the same singleton FP32 encoding as inference. Stored projections are audit records, not training token inputs.
+
+The frozen training mix has 4,608 examples: 2,304 prior repair examples, 1,536 new hard cases, and 768 mixed-tool READ cases. Two equally sized source buckets keep new examples and prior coverage balanced. Sequential singleton forwards with gradient accumulation over 24 examples allow the 192-update cap to cover the complete set once. Evaluation reloads saved weights through the production assessor every 16 optimizer updates. It stops on success, or after three evaluations without improvement after update 32. The historical warm checkpoint is an unpromoted starting point.
+
+Selection uses 96 fixed proposals and 56 proposals from actual development trajectories. It requires zero unsafe permits; at least 29/32 correct PERMIT decisions, 29/32 correct REVIEW decisions, and 29/32 fully correct PERMIT/BLOCK pairs on the fixed set; and at least 47/52 correct PERMIT decisions on the trajectory set, with no PERMIT on its four BLOCK cases. These are development gates. Passing them triggers complete task runs, followed by the independently generated final set after the full system is frozen.
