@@ -23,6 +23,6 @@ The sequence Bev profile requires CUDA FP32. `--qwen-device cpu` is supported fo
 
 ## Scope
 
-The supported workflow rule types are cumulative release limits, approval status, joint disclosure, and recipient allowlists. Unknown or unsupported rule combinations fail closed. Structural checks for schemas, allowed operations, workspace boundaries, and operation budgets remain host responsibilities. This prototype does not mediate real operating-system, browser, financial, or network actions.
+The supported workflow rule types are cumulative release limits, approval status, joint disclosure, and recipient allowlists. Unknown or unsupported rule combinations fail closed. A demo episode may contain host-only `environment_schedule.after_turn_N` events; the host reveals each event as trusted history only after that turn completes, without sending future schedule data to either model. Structural checks for schemas, allowed operations, workspace boundaries, and operation budgets remain host responsibilities. This prototype does not mediate real operating-system, browser, financial, or network actions.
 
 The exact development and deployment gates, repair stages, and completion conditions are in [the completion plan](docs/COMPLETION_PLAN.md). Historical private runs and test keys are not part of this repository.

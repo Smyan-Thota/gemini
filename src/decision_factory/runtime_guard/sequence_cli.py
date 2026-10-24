@@ -34,7 +34,7 @@ def read_cases(path: Path) -> list[dict[str, Any]]:
         row = json.loads(line)
         allowed = {"schema", "case_id", "task", "host_policy", "initial_observations",
                    "prior_actions", "virtual_files", "action_menu", "turn_action_menus",
-                   "max_steps"}
+                   "max_steps", "environment_schedule"}
         if not isinstance(row, dict) or row.get("schema") != "sequence_host_demo_case/1":
             raise ValueError(f"input row {number} must use sequence_host_demo_case/1")
         if set(row) - allowed or not isinstance(row.get("case_id"), str):
@@ -48,6 +48,8 @@ def read_cases(path: Path) -> list[dict[str, Any]]:
             raise ValueError(f"input row {number} max_steps must be between 1 and 32")
         if not isinstance(row.get("action_menu"), list) and not isinstance(row.get("turn_action_menus"), list):
             raise ValueError(f"input row {number} needs action_menu or turn_action_menus")
+        from .sequence_host import validate_environment_schedule
+        validate_environment_schedule(row.get("environment_schedule"))
         rows.append(row)
     if not rows:
         raise ValueError("input contains no episodes")

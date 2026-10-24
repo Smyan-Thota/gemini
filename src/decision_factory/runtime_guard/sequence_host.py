@@ -1,11 +1,40 @@
 """Narrow no-oracle virtual host helpers retained from the audited episode runner."""
 from __future__ import annotations
 import copy, hashlib, json
+import re
 from pathlib import PurePosixPath
 from typing import Any
 
 def copy_json(value):
     return json.loads(json.dumps(value, ensure_ascii=False))
+
+def validate_environment_schedule(schedule: Any) -> dict[int, list[dict]]:
+    """Validate host-only event timing without projecting future events to models."""
+    if schedule is None:
+        return {}
+    if not isinstance(schedule, dict):
+        raise ValueError("environment_schedule must be an object")
+    parsed: dict[int, list[dict]] = {}
+    for key, events in schedule.items():
+        match = re.fullmatch(r"after_turn_([1-9][0-9]*)", key) if isinstance(key, str) else None
+        if match is None or not isinstance(events, list):
+            raise ValueError("environment_schedule keys must be after_turn_N arrays")
+        turn = int(match.group(1))
+        if turn > 32:
+            raise ValueError("environment event turn exceeds the episode bound")
+        validated = []
+        for event in events:
+            if (not isinstance(event, dict) or set(event) != {"source", "trust", "event"}
+                    or event.get("trust") != "trusted"
+                    or event.get("source") not in {
+                        "authorization-ledger", "artifact-ledger",
+                        "recipient-ledger", "workflow-ledger",
+                    }
+                    or not isinstance(event.get("event"), dict)):
+                raise ValueError("scheduled event must contain trusted source and event object")
+            validated.append(copy_json(event))
+        parsed[turn] = validated
+    return parsed
 
 def build_request(episode: dict, prior_actions: list[dict], observations: list[dict], proposal: dict) -> dict:
     return {"schema": "bev_guard_request/1", "user_request": copy_json(episode["task"]),
@@ -80,6 +109,7 @@ def run_sequence_episode(case: dict, *, proposer: Any, host: Any,
         raise ValueError("max_steps exceeds the runtime safety bound of 32")
     if scheduled_menus is not None:
         max_steps = min(max_steps, len(scheduled_menus))
+    event_schedule = validate_environment_schedule(case.get("environment_schedule"))
     steps: list[dict[str, Any]] = []
     terminal = "step_limit"
     for turn in range(max_steps):
@@ -159,13 +189,22 @@ def run_sequence_episode(case: dict, *, proposer: Any, host: Any,
         assessment = host_record.get("classifier_assessment")
         evidence = assessment.get("evidence", {}) if isinstance(assessment, dict) else {}
         guard_request = evidence.get("request") if isinstance(evidence, dict) else None
-        steps.append({"turn": turn + 1, "qwen": copy_json(qwen_result),
+        step_record = {"turn": turn + 1, "qwen": copy_json(qwen_result),
                       "qwen_input": qwen_input, "qwen_prompt_sha256": prompt_hash,
                       "proposal": proposal, "guard_request": guard_request,
                       "request_sha256": host_record.get("request_sha256"),
                       "guard_assessment": assessment,
                       "assessment_snapshot_sha256": host_record.get("assessment_snapshot_sha256"),
-                      "host_result": host_record})
+                      "host_result": host_record}
+        revealed = []
+        for event in event_schedule.get(turn + 1, []):
+            observation = {"source": event["source"], "trust": "trusted",
+                           "text": json.dumps(event["event"], ensure_ascii=False,
+                                               sort_keys=True, separators=(",", ":"))}
+            host.observations.append(copy_json(observation))
+            revealed.append(observation)
+        step_record["revealed_environment_observations"] = revealed
+        steps.append(step_record)
         if host_result.final_disposition == "REVIEW":
             terminal = "guard_review"
             break
