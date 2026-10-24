@@ -1,0 +1,48 @@
+{
+  "schema": "stage_c_runtime_cohort_freeze/1",
+  "runtime_commit": "9d4972b",
+  "event_regression_commit": "8334234767992085b41527a5ad6ab1009204f1a8",
+  "current_checkout_commit": "52b0fc446ad8cf6545753d78f13318b20025bf87",
+  "commands": [
+    "python -m unittest discover -s tests -v",
+    "python -m compileall -q src/decision_factory/runtime_guard"
+  ],
+  "result": "13 tests passed; compileall passed",
+  "scope": "CPU-only; no model weights/inference/training; separate-key scripted feasibility through production host and independent reference",
+  "cohort_location": "local AppData\\gemini\\stage-c-v2 (outside repository)",
+  "cohort_counts": {
+    "cases": 28,
+    "release_limit": 7,
+    "approval_status": 7,
+    "joint_disclosure": 7,
+    "recipient_allowlist": 7,
+    "repaired_public_targets": 14,
+    "scheduled_trusted_events": 7,
+    "bounded_reference_host_paths": 28,
+    "dev_seen_cases": 28
+  },
+  "cohort_sha256": {
+    "episodes.jsonl": "198cf0560ab8dce1d09d5a88d92c42aff5378687c03c373f052068c09d2065f2",
+    "score-key.jsonl": "7df71644d549ffe8d41db99fb95ce735df3f0e947c88c76617fc64ef6e2da708",
+    "audit.jsonl": "44614ea16169d1ce19c63c15e9672e1620cf002e309541a9a75a96caab34ceea",
+    "manifest.json": "4331bd6eceafb35cc385fe4289f0afadfd4dec4b2e4c15fbd7e106530cb36251",
+    "independent-check.json": "ad697117d2928195e88c89be106e92652a133487a0249a021f4aa47f41a698a2"
+  },
+  "source_sha256": {
+    "src/decision_factory/runtime_guard/sequence_cli.py": "03ed7c620ebbc7e5930da5e29daa7e6d4065758ab82f0e7bbdd733cd2c90d05c",
+    "src/decision_factory/runtime_guard/sequence_host.py": "b3735d29a5db17c4b3083d23c8a78a2f6431a7856ecded92ef2f364fe10b98da",
+    "src/decision_factory/runtime_guard/qwen.py": "555d55e47d67a4d2ed55e47e5358443fd08bd640fac211048ee726a200a2aef5",
+    "src/decision_factory/runtime_guard/host.py": "16e761af98c91cc58b554584813351c25bc95525c6f539953cc396c7cd709f02",
+    "src/decision_factory/runtime_guard/sequence.py": "7b031b71a4e003bf569df54e32670ce1f950b4ac4d5837ada2f0b6331ca7bc81",
+    "src/decision_factory/runtime_guard/contract_reference.py": "21fc83e04ff31f545f9ddbda620dc429d082ba26e607ffc11e7720518aada951",
+    "tests/test_stage_c_event_visibility.py": "fee03d6c2654a0f1f69dae6e802c5d4678ddd8a61372246d6276337472d6228b",
+    "README.md": "8a2a6927ff13eb085c802bc63a41ef31054344c7f58345c1a846e442923ae66a"
+  },
+  "frozen_source_sha256": {
+    "standard": "670183b188ac6170893944b20a1c1f09483fe8f4cf5b7890f57a701df63ab3f9",
+    "standard_key": "ffdb6db543abf1407c103b176f9bacf06315fa54079fdc5aad659dac23738ccb",
+    "adversarial": "e0fb67d16724fe8fff08ccbb6a961a0a338b97edf71e215833cb807edca4445b",
+    "adversarial_key": "00741b395cdefd742077796a43f9e6623ef84b84841000bbee5ec9531f880b12",
+    "decision_contract": "a3aab29b60b09a38d87081314a3c53a7c23815da5e7fd161e254d1124f1cdaf5"
+  }
+}
