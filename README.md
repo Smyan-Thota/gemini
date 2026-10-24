@@ -21,6 +21,8 @@ python -m decision_factory.runtime_guard.sequence_cli `
 
 The sequence Bev profile requires CUDA FP32. `--qwen-device cpu` is supported for the proposer if GPU memory is constrained; `--bev-device cpu` is intentionally unsupported. The prior one-turn assessment-only command is retained as `sequence-guard-assess-legacy` (`sequence-guard-demo` is its compatibility alias). The full host command is `sequence-guard` (`sequence-guard-host-demo` is its alias). These demos execute only synthetic in-memory effects and never access the operating system or network.
 
+The bounded host command defaults to H17's `finite_mean_logprob` proposal mode: it scores only canonical ACT outputs for the current public menu, REVIEW, and STOP, including EOS, and uses mean causal log likelihood with a fixed tie rule. This is a deterministic format-constrained heuristic, not a calibrated confidence score. Pass `--qwen-proposal-mode generate` to reproduce unconstrained generation; the one-turn legacy assessor keeps that mode.
+
 ## Scope
 
 The supported workflow rule types are cumulative release limits, approval status, joint disclosure, and recipient allowlists. Unknown or unsupported rule combinations fail closed. A demo episode may contain host-only `environment_schedule.after_turn_N` events; the host reveals each event as trusted history only after that turn completes, without sending future schedule data to either model. Structural checks for schemas, allowed operations, workspace boundaries, and operation budgets remain host responsibilities. This prototype does not mediate real operating-system, browser, financial, or network actions.

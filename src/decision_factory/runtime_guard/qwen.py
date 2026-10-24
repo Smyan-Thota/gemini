@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,7 +17,10 @@ class QwenProposer:
 
     def __init__(self, adapter_dir: str | Path, *, device: str = "cuda",
                  cache_root: str | Path | None = None, max_new_tokens: int = 128,
-                 base_model_path: str | Path | None = None):
+                 base_model_path: str | Path | None = None,
+                 proposal_mode: str = "generate"):
+        if proposal_mode not in {"generate", "finite_mean_logprob"}:
+            raise ValueError("proposal_mode must be generate or finite_mean_logprob")
         adapter = Path(adapter_dir).resolve(strict=True)
         cfg_path = adapter / "adapter_config.json"
         if not cfg_path.is_file() or not (adapter / "adapter_model.safetensors").is_file():
@@ -40,6 +44,7 @@ class QwenProposer:
         self.base_snapshot = str(base.resolve())
         self.adapter_dir = str(adapter)
         self.device = device
+        self.proposal_mode = proposal_mode
         self.adapter_sha256 = hashlib.sha256((adapter / "adapter_model.safetensors").read_bytes()).hexdigest()
         self.adapter_config_sha256 = hashlib.sha256(cfg_path.read_bytes()).hexdigest()
         from decision_factory.recovery.computer_safety import load_text_tool_model
@@ -54,7 +59,108 @@ class QwenProposer:
                 "base_snapshot": self.base_snapshot, "adapter_dir": self.adapter_dir,
                 "adapter_sha256": self.adapter_sha256,
                 "adapter_config_sha256": self.adapter_config_sha256,
-                "device": self.device}
+                "device": self.device, "proposal_mode": getattr(self, "proposal_mode", "generate")}
+
+    def _finite_menu_decision(self, prompt: str, actions: list[Any]) -> dict[str, Any]:
+        """Score only canonical menu decisions with the frozen causal-mean rule."""
+        runtime = getattr(self.callback, "runtime", None)
+        if runtime is None:
+            raise RuntimeError("finite menu scoring requires the local model runtime")
+        tokenizer, model = runtime.tokenizer, runtime.model
+        chat_prompt = tokenizer.apply_chat_template(
+            [{"role": "user", "content": prompt}], tokenize=False,
+            add_generation_prompt=True, enable_thinking=False)
+        encoded = tokenizer(chat_prompt, return_tensors="pt", add_special_tokens=False)
+        prompt_ids_tensor = encoded["input_ids"]
+        if getattr(prompt_ids_tensor, "ndim", None) != 2 or prompt_ids_tensor.shape[0] != 1:
+            raise ValueError("finite menu prompt tokens must have shape [1, sequence_length]")
+        prompt_ids = [int(token) for token in prompt_ids_tensor[0].detach().cpu().tolist()]
+        prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        chat_prompt_hash = hashlib.sha256(chat_prompt.encode("utf-8")).hexdigest()
+        eos = tokenizer.eos_token_id
+        if eos is None:
+            raise RuntimeError("Qwen tokenizer has no EOS token for candidate scoring")
+
+        candidates: list[dict[str, Any]] = []
+        for index, action in enumerate(actions):
+            decision = {"type": "ACT", "action": action.action_id}
+            candidates.append({"decision": decision,
+                               "text": json.dumps(decision, ensure_ascii=False,
+                                                   sort_keys=True, separators=(",", ":")),
+                               "priority": 2, "menu_index": index})
+        review = {"type": "REVIEW", "reason": "uncertain"}
+        stop = {"type": "STOP"}
+        candidates.extend([
+            {"decision": review, "text": json.dumps(review, sort_keys=True, separators=(",", ":")),
+             "priority": 0, "menu_index": -1},
+            {"decision": stop, "text": json.dumps(stop, sort_keys=True, separators=(",", ":")),
+             "priority": 1, "menu_index": -1},
+        ])
+
+        from decision_factory.recovery.computer_safety import _context_limit
+        context_limit = _context_limit(getattr(model, "config", None))
+        scored: list[dict[str, Any]] = []
+        import torch
+        for candidate in candidates:
+            text = candidate["text"]
+            combined = tokenizer(chat_prompt + text, add_special_tokens=False)["input_ids"]
+            standalone = tokenizer(text, add_special_tokens=False)["input_ids"]
+            if combined[:len(prompt_ids)] != prompt_ids or combined[len(prompt_ids):] != standalone:
+                raise RuntimeError("candidate continuation retokenizes the prompt boundary")
+            target_ids = [int(token) for token in standalone] + [int(eos)]
+            if not target_ids or len(prompt_ids) + len(target_ids) > context_limit:
+                raise ValueError("finite menu candidate exceeds model context or is empty")
+            input_ids = torch.tensor([prompt_ids + target_ids[:-1]], dtype=torch.long,
+                                     device=runtime.device)
+            attention_mask = torch.ones_like(input_ids)
+            with torch.inference_mode():
+                output = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
+                start = len(prompt_ids) - 1
+                logits = output.logits[0, start:start + len(target_ids), :].float()
+                if logits.shape[0] != len(target_ids):
+                    raise RuntimeError("finite menu continuation logits are misaligned")
+                target = torch.tensor(target_ids, dtype=torch.long, device=logits.device)
+                token_logprobs = torch.log_softmax(logits, dim=-1).gather(
+                    1, target[:, None]).squeeze(1)
+                values = [float(value) for value in token_logprobs.detach().cpu().tolist()]
+            total = sum(values)
+            mean = total / len(values)
+            if not math.isfinite(total) or not math.isfinite(mean):
+                raise ValueError("finite menu scoring returned a non-finite log likelihood")
+            row = {"candidate": candidate["decision"], "text": text,
+                   "candidate_token_ids": target_ids, "logprob_sum": total,
+                   "token_count": len(values), "mean_logprob": mean,
+                   "priority": candidate["priority"], "menu_index": candidate["menu_index"]}
+            parsed, error = __import__(
+                "decision_factory.recovery.core", fromlist=["_strict_decision"])._strict_decision(text)
+            if parsed != candidate["decision"]:
+                raise ValueError(f"canonical finite candidate failed strict parser: {error}")
+            scored.append(row)
+
+        winner = min(scored, key=lambda row: (-row["mean_logprob"], row["priority"], row["menu_index"]))
+        parsed = winner["candidate"]
+        audit = {
+            "schema": "finite_menu_score/1",
+            "prompt_sha256": prompt_hash,
+            "chat_prompt_sha256": chat_prompt_hash,
+            "prompt_token_ids": prompt_ids,
+            "scoring_rule": "mean causal completion-token log-likelihood over canonical candidate IDs through closing JSON token plus EOS",
+            "tie_break": "exact equal means: REVIEW, then STOP, then ACT in public menu order",
+            "candidate_scores": [{key: row[key] for key in (
+                "candidate", "text", "candidate_token_ids", "logprob_sum", "token_count", "mean_logprob")}
+                for row in scored],
+            "selected": parsed,
+        }
+        if parsed["type"] in {"STOP", "REVIEW"}:
+            return {"type": parsed["type"], "decision": parsed, "raw_output": winner["text"],
+                    "generation_audit": audit, "model_provenance": self.provenance}
+        selected_action = next((action for action in actions if action.action_id == parsed["action"]), None)
+        if selected_action is None:
+            raise ValueError("finite scorer selected an action outside the current menu")
+        return {"type": "PROPOSE", "proposal": {"tool_name": selected_action.operation,
+                "arguments": dict(selected_action.arguments)}, "action_id": selected_action.action_id,
+                "decision": parsed, "raw_output": winner["text"], "generation_audit": audit,
+                "model_provenance": self.provenance}
 
     def propose(self, task_input: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(task_input, Mapping):
@@ -126,6 +232,14 @@ class QwenProposer:
                                   "decision": None, "proposal": None, "error": None}
         self.calls.append(record)
         try:
+            if getattr(self, "proposal_mode", "generate") == "finite_mean_logprob":
+                result = self._finite_menu_decision(prompt, actions)
+                record["raw_output"] = result["raw_output"]
+                record["decision"] = result["decision"]
+                if result["type"] == "PROPOSE":
+                    record["proposal"] = result["proposal"]
+                record["generation_audit"] = result["generation_audit"]
+                return result
             raw = self.callback(prompt)
             record["raw_output"] = raw
             generation_audit = None

@@ -108,6 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--qwen-base", type=Path, required=True,
                         help="existing local Qwen snapshot at the adapter-pinned revision")
     parser.add_argument("--qwen-device", choices=("cuda", "cpu"), default="cuda")
+    parser.add_argument("--qwen-proposal-mode", choices=("finite_mean_logprob", "generate"),
+                        default="finite_mean_logprob",
+                        help="finite H17 menu scoring avoids unconstrained output parsing; generate is retained for comparison")
     parser.add_argument("--bev-device", choices=("cuda",), default="cuda",
                         help="sequence Bev is supported only on CUDA FP32")
     parser.add_argument("--sequence-checkpoint", type=Path, default=DEFAULT_SEQUENCE_CHECKPOINT)
@@ -139,7 +142,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if sha256_file(sequence_checkpoint) != SEQUENCE_CHECKPOINT_SHA256:
         raise RuntimeError("sequence checkpoint hash differs from the source-pinned checkpoint")
-    proposer = QwenProposer(DEFAULT_ADAPTER, device=args.qwen_device, base_model_path=qwen_base)
+    proposer = QwenProposer(DEFAULT_ADAPTER, device=args.qwen_device, base_model_path=qwen_base,
+                            proposal_mode=args.qwen_proposal_mode)
     if proposer.revision != QWEN_REVISION:
         raise RuntimeError("H17 adapter revision does not match the pinned Qwen snapshot")
     started = time.perf_counter()
