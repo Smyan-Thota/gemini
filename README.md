@@ -2,7 +2,7 @@
 
 This repository contains the source for a local, experimental sequence runtime guard. Qwen proposes a tool call, Bev assesses the exact proposal using the current task policy and history, and a bounded host applies only synthetic in-memory effects. The included examples contain no evaluator labels. The host demo performs no filesystem, network, or account actions.
 
-The current V7 Bev guard is **experimental and unpromoted**. It reduced observed unauthorized effects in one small adversarial set, but it also reduced completion on standard tasks and completed none of the 12 adversarial tasks. These results do not establish general safety or superiority. See [measured results](docs/RESULTS.md) and the [completion plan](docs/COMPLETION_PLAN.md).
+The current V7 Bev guard is **experimental and unpromoted**. On 28 corrected multi-step development tasks, Qwen with V7 completed 12 safely with zero unauthorized effects; Qwen without the learned guard completed 19 safely and caused two unauthorized effects. A bounded output-format repair subsequently raised Qwen's safe completion with a diagnostic reference guard to 26/28. That diagnostic uses a rule reference, so it is not a result for the learned pair. Bev input and training repairs are in progress. See [measured results](docs/RESULTS.md) and the [completion plan](docs/COMPLETION_PLAN.md).
 
 ## Source-only checkout
 

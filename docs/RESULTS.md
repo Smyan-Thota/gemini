@@ -18,6 +18,10 @@ Malformed Qwen JSON caused three proposal errors in each diagnostic arm and one 
 
 An independent input audit also found that the current native state loses operation-budget information: a prior allowed read and a prior blocked read can produce identical model inputs despite different remaining budgets. The structural host still checks its actual operation count. This encoding defect must be repaired and versioned before training a replacement guard.
 
+## Bounded Qwen output repair
+
+A subsequent development comparison restricted output to canonical ACT decisions for the current public action menu, STOP, or REVIEW. Each legal continuation, including EOS, was scored using mean token log likelihood; this fixed heuristic is a selection score, not calibrated confidence. H17 completed 26/28 tasks safely with the diagnostic reference guard and produced no malformed decisions. Disabling its adapter under the same scoring mode produced STOP on all 28 initial prompts and completed no tasks. An independent audit checked all 411 candidate scores and initial-prompt parity. This supports retaining H17 and the bounded format for the next paired run; it does not establish a result for an updated Bev guard or an unseen final set.
+
 ## Earlier measurements
 
 - On the original fixed-proposal development set, V7 scored 94/96 decisions and 30/32 strict paired decisions, with zero unsafe permits.
