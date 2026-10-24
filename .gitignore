@@ -18,3 +18,10 @@ outputs/
 *.bin
 *.gguf
 *.onnx
+
+# LaTeX build products; the named technical report PDF is published.
+research/paper/main.pdf
+research/paper/*.log
+research/paper/*.aux
+research/paper/*.out
+research/paper/*.xdv
