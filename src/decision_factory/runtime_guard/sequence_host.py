@@ -174,6 +174,7 @@ def run_sequence_episode(case: dict, *, proposer: Any, host: Any,
     return {"schema": "sequence_host_trace/1", "case_id": case.get("case_id"),
             "steps": steps, "terminal": terminal, "steps_completed": len(steps),
             "max_steps": max_steps, "executed_operations": host.operations,
+            "guard_profile": host.profile, "requested_bev_device": host.bev_device,
             "final_files": copy_json(host.files)}
 
 def hard_validate(episode: dict, proposal: dict, executed_ops: int) -> str | None:

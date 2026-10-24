@@ -87,10 +87,12 @@ def run_case(case: dict[str, Any], *, proposer: Any, sequence_checkpoint: Path,
             sequence_device=device,
         )
 
+    legacy_route = "workflow_rules" not in case["host_policy"]
     host = GuardHost(request=base_request, initial_files=case["virtual_files"],
                      mode="qwen-bev", bev_evaluator=assess,
-                     bev_head_checkpoint=str(sequence_checkpoint), bev_device="cuda",
-                     profile="sequence")
+                     bev_head_checkpoint=str(sequence_checkpoint),
+                     bev_device="cpu" if legacy_route else "cuda",
+                     profile="legacy_v4_cpu" if legacy_route else "sequence")
     trace = run_sequence_episode(case, proposer=proposer, host=host, max_steps=max_steps)
     trace["qwen_provenance"] = proposer.provenance
     return trace
@@ -156,7 +158,10 @@ def main(argv: list[str] | None = None) -> int:
     receipt = {
         "schema": "sequence_guard_run_receipt/2",
         "status": "complete",
-        "profile": "sequence_cuda_fp32",
+        "profile": "routed_sequence_cuda_fp32_with_legacy_v4_cpu",
+        "profile_counts": {profile_name: sum(
+            1 for trace in traces if trace.get("guard_profile") == profile_name)
+            for profile_name in ("sequence", "legacy_v4_cpu")},
         "input": str(source), "input_sha256": sha256_file(source),
         "output": str(output), "output_sha256": sha256_file(output),
         "episode_count": len(cases),
