@@ -97,8 +97,7 @@ class SharedFiniteH17:
 
 def run_arm(arm: str, cases: list[dict[str, Any]], *, proposer: SharedFiniteH17,
             v7_checkpoint: Path, legacy_checkpoint: Path,
-            candidate_checkpoint: Path, candidate_sha256: str,
-            reference_context: str = "closed_loop") -> list[dict[str, Any]]:
+            candidate_checkpoint: Path, candidate_sha256: str) -> list[dict[str, Any]]:
     from decision_factory.runtime_guard.host import GuardHost
     from decision_factory.runtime_guard.sequence_cli import planned_steps
     from decision_factory.runtime_guard.sequence_host import run_sequence_episode

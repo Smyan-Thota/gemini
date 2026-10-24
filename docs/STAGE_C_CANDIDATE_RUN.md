@@ -6,6 +6,24 @@ The input is the frozen local cohort at `%LOCALAPPDATA%\gemini\stage-c-v2\episod
 
 Use the existing local inference environment and cached base snapshots. Substitute the selected candidate file and exact SHA from its selection receipt; do not use a checkpoint that has not passed the current single-request assessor gates.
 
+Preflight the exact local files without loading models:
+
+```powershell
+$repo = 'C:\Users\smyan\OneDrive\Desktop\gemini'
+$python = 'C:\Users\smyan\OneDrive\Desktop\bevthing\.venv\Scripts\python.exe'
+$env:PYTHONPATH = Join-Path $repo 'src'
+$candidate = 'C:\path\to\selected-candidate.pt'
+$candidateSha = 'replace-with-the-exact-64-character-checkpoint-sha256'
+$preflightOut = Join-Path $env:LOCALAPPDATA 'gemini\stage-c-v3\matched-preflight'
+
+& $python (Join-Path $repo 'tools\run_stage_c_matched_candidate.py') `
+  --preflight-only --out-dir $preflightOut `
+  --candidate-checkpoint $candidate --candidate-sha256 $candidateSha
+if ($LASTEXITCODE -ne 0) { throw "Matched Stage C preflight failed: $LASTEXITCODE" }
+```
+
+After the preflight passes and the selected model is frozen, run the inference command:
+
 ```powershell
 $repo = 'C:\Users\smyan\OneDrive\Desktop\gemini'
 $python = 'C:\Users\smyan\OneDrive\Desktop\bevthing\.venv\Scripts\python.exe'
