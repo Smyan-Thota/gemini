@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from decision_factory.runtime_guard import bev, sequence_candidate, sequence_v2  # noqa: E402
+from decision_factory.runtime_guard import bev, sequence_candidate, sequence_v2, sequence_v3  # noqa: E402
 from decision_factory.runtime_guard.contract_reference import decide_request  # noqa: E402
 from decision_factory.runtime_guard.host import public_decision_contract  # noqa: E402
 from decision_factory.training.trainer import _tokenize_rows  # noqa: E402
@@ -169,6 +169,26 @@ class CandidateInputParityTests(unittest.TestCase):
         self.assertEqual(sample["encoded_sha256"], expected["encoded_input_sha256"])
         self.assertEqual(sample["input_ids_sha256"], expected["input_ids_sha256"])
         self.assertEqual(sample["attention_mask_sha256"], expected["attention_mask_sha256"])
+
+    def test_v3_trainer_uses_fresh_profile_not_stored_v2_projection(self) -> None:
+        request = _fixture_request()
+        expected = sequence_candidate.encode_candidate_input(
+            request, _FakeDecider(), input_profile="operation_facts_v3")
+        row = {"sample_id": "v3-fixture", "source": "fresh", "request": request,
+               "state": expected["model_state"]}
+        labels = {"v3-fixture": {"verdict": "PERMIT"}}
+        samples, _ = _tokenize_rows(
+            [row], labels, _FakeDecider(), bev, sequence_v2, sequence_candidate,
+            ROOT / "src", input_profile="operation_facts_v3", sequence_v3=sequence_v3)
+        sample = samples[0]
+        self.assertEqual(sample["state"], expected["model_state"])
+        self.assertEqual(sample["state_sha256"], hashlib.sha256(
+            json.dumps(expected["model_state"], ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest())
+        self.assertEqual(sample["stored_state_value_sha256"], hashlib.sha256(
+            json.dumps(expected["model_state"], ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest())
+        self.assertEqual(sample["encoded_sha256"], expected["encoded_input_sha256"])
 
 
 if __name__ == "__main__":

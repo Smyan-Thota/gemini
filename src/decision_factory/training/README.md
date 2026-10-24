@@ -1,6 +1,6 @@
 # Bev training protocol
 
-This package contains an operator-invoked, single-GPU trainer for the pinned Bev decision model. It imports the production modules from this Gemini source tree, uses `sequence_v2.sequence_state_v2` to build the same alpha-bound v2 state used at runtime, and writes checkpoints accepted by the production candidate loader. It does not read or import the historical bevthing training source.
+This package contains an operator-invoked, single-GPU trainer for the pinned Bev decision model. It imports the production modules from this Gemini source tree and writes checkpoints accepted by the production candidate loader. The default `native_v2` profile uses `sequence_v2.sequence_state_v2`; the explicitly configured `operation_facts_v3` profile uses the production typed-facts projection and its v3 metadata pins. The v3 experiment is a typed representation ablation (about 1.2% shorter on the frozen fixtures), not a large compression claim. The trainer does not read or import historical bevthing training source.
 
 The input is three separate JSONL files per split. State rows contain only the frozen state and its balancing source:
 

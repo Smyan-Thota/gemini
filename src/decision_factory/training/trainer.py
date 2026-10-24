@@ -17,6 +17,10 @@ from .protocol import (assert_gemini_module_origins, balanced_accumulation_group
                        sha256_bytes, sha256_json)
 
 TRAINING_INPUT_MODE = "production_native_v2_token_stream_singleton_fp32"
+TRAINING_INPUT_MODE_V3 = "production_operation_facts_v3_token_stream_singleton_fp32"
+INPUT_PROFILE_V2 = "native_v2"
+INPUT_PROFILE_V3 = "operation_facts_v3"
+V3_TRAINING_CONTRACT = "sequence-guard-v3-compact-operation-facts-v3-representation-ablation"
 _V9_PRIOR_SHA256 = "ec3b8ef8fddc4b5560e25149e5d0c98999b6046e58c187e116cf26bc8aeab7c2"
 _V9_PRIOR_MANIFEST_SHA256 = "254026dbcc2f8118d78e44c6dbaf5957bb10315f392416e02a131799a6a82359"
 _V9_PRIOR_CONTRACT = "sequence-guard-v9-native-v2-full-depth-balanced-source-sequence-only"
@@ -47,7 +51,8 @@ def _module_tensor_sha256(module: Any, *, include_lora: bool = False) -> str:
 
 
 def _validate_warm_payload(payload: Any, warm_sha: str, bev: Any, sequence_v2: Any,
-                           config: dict[str, Any]) -> str:
+                           config: dict[str, Any], *, input_profile: str = INPUT_PROFILE_V2,
+                           sequence_v3: Any = None) -> str:
     """Bind the only permitted historical warm start to its exact V9 identity."""
     base = {"schema": "bev_lora_head_checkpoint/2", "base_model_id": bev.MODEL_ID,
             "base_revision": bev.MODEL_REVISION, "base_weight_sha256": bev.MODEL_SHA256}
@@ -66,14 +71,30 @@ def _validate_warm_payload(payload: Any, warm_sha: str, bev: Any, sequence_v2: A
         if any(payload.get(key) != value for key, value in expected.items()):
             raise ValueError("exact V9 warm prior does not match its frozen historical metadata")
         return "unpromoted_v9_prior"
-    expected = {
-        "training_input_mode": TRAINING_INPUT_MODE,
-        "model_state_schema": "sequence_guard_native_state_alpha/2",
-        "model_state_encoder_sha256": sequence_v2.NATIVE_STATE_V2_SHA256,
-        "model_state_transform_sha256": sequence_v2.ALPHA_BIND_V2_SHA256,
-        "model_state_manifest_sha256": config["model_state_manifest_sha256"].lower(),
-        "model_state_independent_audit_sha256": config["model_state_independent_audit_sha256"].lower(),
-    }
+    if input_profile == INPUT_PROFILE_V2:
+        expected = {
+            "training_input_mode": TRAINING_INPUT_MODE,
+            "model_state_schema": "sequence_guard_native_state_alpha/2",
+            "model_state_encoder_sha256": sequence_v2.NATIVE_STATE_V2_SHA256,
+            "model_state_transform_sha256": sequence_v2.ALPHA_BIND_V2_SHA256,
+            "model_state_manifest_sha256": config["model_state_manifest_sha256"].lower(),
+            "model_state_independent_audit_sha256": config["model_state_independent_audit_sha256"].lower(),
+        }
+    elif input_profile == INPUT_PROFILE_V3 and sequence_v3 is not None:
+        pins = sequence_v3.source_pins()
+        expected = {
+            "training_input_mode": TRAINING_INPUT_MODE_V3,
+            "model_state_schema": "sequence_guard_operation_facts_alpha/3",
+            "candidate_training_contract": V3_TRAINING_CONTRACT,
+            "model_state_encoder_sha256": pins["operation_facts_v3_sha256"],
+            "model_state_transform_sha256": pins["alpha_bind_operation_facts_v3_sha256"],
+            "model_state_alpha_base_sha256": pins["alpha_bind_v1_sha256"],
+            "model_state_contract_sha256": pins["contract_sha256"],
+            "model_state_manifest_sha256": config["model_state_manifest_sha256"].lower(),
+            "model_state_independent_audit_sha256": config["model_state_independent_audit_sha256"].lower(),
+        }
+    else:
+        raise ValueError(f"unsupported training input profile: {input_profile}")
     if any(payload.get(key) != value for key, value in expected.items()):
         raise ValueError("warm checkpoint does not match the pinned base and frozen alpha-v2 input contract")
     if type(payload.get("selected_step")) is not int or payload["selected_step"] <= 0:
@@ -114,11 +135,13 @@ def _runtime(base_snapshot: Path, runtime_source: Path):
     if runtime_source.resolve() != source_root.resolve():
         raise RuntimeError(f"training module is outside expected Gemini source: {runtime_source}")
     base_snapshot = base_snapshot.expanduser().resolve(strict=True)
-    from decision_factory.runtime_guard import bev, sequence_candidate, sequence_v2
+    from decision_factory.runtime_guard import bev, sequence_candidate, sequence_v2, sequence_v3
     if Path(bev.__file__).resolve().parents[2] != source_root:
         raise RuntimeError("Bev production module did not load from this Gemini source tree")
     if Path(sequence_v2.__file__).resolve().parents[2] != source_root:
         raise RuntimeError("sequence production module did not load from this Gemini source tree")
+    if Path(sequence_v3.__file__).resolve().parents[2] != source_root:
+        raise RuntimeError("operation-facts production module did not load from this Gemini source tree")
     if base_snapshot.name != bev.MODEL_REVISION:
         raise RuntimeError("base snapshot directory must be the pinned Bev revision")
     weights = base_snapshot / "model.safetensors"
@@ -131,7 +154,7 @@ def _runtime(base_snapshot: Path, runtime_source: Path):
     if digest.hexdigest() != bev.MODEL_SHA256:
         raise RuntimeError("pinned base weight hash mismatch")
     os.environ["BEV_MODEL_SNAPSHOT"] = str(base_snapshot)
-    return bev, sequence_v2, sequence_candidate, source_root
+    return bev, sequence_v2, sequence_v3, sequence_candidate, source_root
 
 
 def _load_model(bev: Any, warm_checkpoint: Path | None, torch: Any, peft: Any,
@@ -190,17 +213,21 @@ def _load_model(bev: Any, warm_checkpoint: Path | None, torch: Any, peft: Any,
 def _tokenize_rows(rows: list[dict[str, Any]], labels: dict[str, dict[str, Any]],
                    decider: Any, bev: Any, sequence_v2: Any,
                    sequence_candidate: Any,
-                   source_root: Path) -> tuple[list[dict[str, Any]], dict[str, str]]:
+                   source_root: Path, *, input_profile: str = INPUT_PROFILE_V2,
+                   sequence_v3: Any = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
     samples: list[dict[str, Any]] = []
     state_hashes: dict[str, str] = {}
     for row in rows:
         # The runtime assessor owns normalization order and exact serialization.
         # Use its shared CPU helper; the frozen JSON row is a value audit only.
-        prepared = sequence_candidate.encode_candidate_input(row["request"], decider)
+        prepared = sequence_candidate.encode_candidate_input(
+            row["request"], decider, input_profile=input_profile)
         state = prepared["model_state"]
         if state != row["state"]:
             raise ValueError(f"frozen state differs from production projection for {row['sample_id']!r}")
-        if state.get("schema") != "sequence_guard_native_state_alpha/2":
+        expected_schema = ("sequence_guard_native_state_alpha/2" if input_profile == INPUT_PROFILE_V2
+                           else "sequence_guard_operation_facts_alpha/3")
+        if state.get("schema") != expected_schema:
             raise ValueError(f"unsupported model state schema for {row['sample_id']!r}")
         state_hash = sha256_json(state)
         state_hashes[row["sample_id"]] = state_hash
@@ -209,6 +236,7 @@ def _tokenize_rows(rows: list[dict[str, Any]], labels: dict[str, dict[str, Any]]
         # Keep only the production-built object. Encoded attention matrices
         # are large; retain hashes, then rebuild the singleton encoding at use.
         sample["state"] = state
+        sample["stored_state_value_sha256"] = sha256_json(row["state"])
         sample["keys"] = list(encoded["keys"])
         sample["group_id"] = labels[row["sample_id"]].get("group_id")
         sample["pair_id"] = labels[row["sample_id"]].get("pair_id")
@@ -232,9 +260,11 @@ def _tokenize_rows(rows: list[dict[str, Any]], labels: dict[str, dict[str, Any]]
 
 def _verify_warm_assessor_parity(row: dict[str, Any], decider: Any, bev: Any,
                                  sequence_candidate: Any, warm_path: Path,
-                                 warm_sha: str, frozen_sha: str) -> dict[str, Any]:
+                                 warm_sha: str, frozen_sha: str, *,
+                                 input_profile: str = INPUT_PROFILE_V2) -> dict[str, Any]:
     """Check one shared-helper fingerprint against the reloaded warm assessor."""
-    prepared = sequence_candidate.encode_candidate_input(row["request"], decider)
+    prepared = sequence_candidate.encode_candidate_input(
+        row["request"], decider, input_profile=input_profile)
     if prepared["model_state"] != row["state"]:
         raise RuntimeError("warm assessor representative differs from frozen state values")
     token_hashes = _hash_example(prepared["encoded"])
@@ -245,12 +275,13 @@ def _verify_warm_assessor_parity(row: dict[str, Any], decider: Any, bev: Any,
     result = sequence_candidate.assess_candidate(
         row["request"], checkpoint_path=warm_path,
         expected_checkpoint_sha256=warm_sha, device="cuda",
-        allow_unpromoted_v9_prior=True)
+        allow_unpromoted_v9_prior=True, input_profile=input_profile)
     if result.get("status") != "assessed":
         raise RuntimeError("warm assessor representative did not complete")
     evidence = result.get("evidence", {})
     expected = {
         "checkpoint_sha256": warm_sha,
+        "model_state_profile": input_profile,
         "frozen_backbone_state_sha256": frozen_sha,
         "model_state_sha256": sha256_json(prepared["model_state"]),
         "model_state_text": prepared["model_state_text"],
@@ -266,6 +297,7 @@ def _verify_warm_assessor_parity(row: dict[str, Any], decider: Any, bev: Any,
     if mismatches:
         raise RuntimeError("warm assessor input fingerprint mismatch: " + ", ".join(mismatches))
     return {"scenario_id": row["sample_id"],
+            "input_profile": input_profile,
             "request_sha256": prepared["request_sha256"],
             "model_state_text_sha256": prepared["model_state_text_sha256"],
             "encoded_input_sha256": prepared["encoded_input_sha256"],
@@ -364,8 +396,35 @@ def _accumulated_optimizer_update(decider: Any, rows: list[dict[str, Any]],
             "pairwise_recompute_forward_calls": float(2 * pair_count)}
 
 
+def _profile_metadata(input_profile: str, sequence_v2: Any, sequence_v3: Any,
+                      config: dict[str, Any]) -> dict[str, str]:
+    if input_profile == INPUT_PROFILE_V2:
+        return {
+            "training_input_mode": TRAINING_INPUT_MODE,
+            "model_state_schema": "sequence_guard_native_state_alpha/2",
+            "model_state_encoder_sha256": sequence_v2.NATIVE_STATE_V2_SHA256,
+            "model_state_transform_sha256": sequence_v2.ALPHA_BIND_V2_SHA256,
+            "model_state_manifest_sha256": config["model_state_manifest_sha256"].lower(),
+            "model_state_independent_audit_sha256": config["model_state_independent_audit_sha256"].lower(),
+        }
+    if input_profile == INPUT_PROFILE_V3:
+        pins = sequence_v3.source_pins()
+        return {
+            "training_input_mode": TRAINING_INPUT_MODE_V3,
+            "candidate_training_contract": V3_TRAINING_CONTRACT,
+            "model_state_schema": "sequence_guard_operation_facts_alpha/3",
+            "model_state_encoder_sha256": pins["operation_facts_v3_sha256"],
+            "model_state_transform_sha256": pins["alpha_bind_operation_facts_v3_sha256"],
+            "model_state_alpha_base_sha256": pins["alpha_bind_v1_sha256"],
+            "model_state_contract_sha256": pins["contract_sha256"],
+            "model_state_manifest_sha256": config["model_state_manifest_sha256"].lower(),
+            "model_state_independent_audit_sha256": config["model_state_independent_audit_sha256"].lower(),
+        }
+    raise ValueError(f"unsupported training input profile: {input_profile}")
+
+
 def _save_step(output: Path, *, step: int, decider: Any, bev: Any, peft: Any,
-               metadata: dict[str, Any], sequence_v2: Any):
+               metadata: dict[str, Any]):
     torch = __import__("torch")
     head_state = {key: value.detach().cpu().contiguous() for key, value in decider.network.head.state_dict().items()}
     lora_state = {key: value.detach().cpu().contiguous()
@@ -387,12 +446,14 @@ def _save_step(output: Path, *, step: int, decider: Any, bev: Any, peft: Any,
         "lora_state_sha256": _tensor_state_sha256(lora_state),
         "peft_version": __import__("importlib.metadata", fromlist=["version"]).version("peft"),
         "lora_config": metadata["lora_config"],
-        "training_input_mode": TRAINING_INPUT_MODE,
-        "model_state_schema": "sequence_guard_native_state_alpha/2",
+        "training_input_mode": metadata["training_input_mode"],
+        "model_state_schema": metadata["model_state_schema"],
         "model_state_encoder_sha256": metadata["model_state_encoder_sha256"],
-        "model_state_transform_sha256": sequence_v2.ALPHA_BIND_V2_SHA256,
+        "model_state_transform_sha256": metadata["model_state_transform_sha256"],
         "model_state_manifest_sha256": metadata["model_state_manifest_sha256"],
         "model_state_independent_audit_sha256": metadata["model_state_independent_audit_sha256"],
+        **({key: metadata[key] for key in ("candidate_training_contract",
+            "model_state_alpha_base_sha256", "model_state_contract_sha256") if key in metadata}),
         "selected_step": step,
         "optimizer_step": step,
         "metadata": metadata,
@@ -414,7 +475,8 @@ def _evaluate_reloaded(rows: list[dict[str, Any]], labels: dict[str, dict[str, A
                        checkpoint: Path, bev: Any, sequence_v2: Any,
                        sequence_candidate: Any, expected_frozen_sha: str,
                        training_network: Any,
-                       *, allow_unpromoted_v9_prior: bool = False) -> dict[str, Any]:
+                       *, allow_unpromoted_v9_prior: bool = False,
+                       input_profile: str = INPUT_PROFILE_V2) -> dict[str, Any]:
     checkpoint_sha = sha256_bytes(checkpoint.read_bytes())
     correct = 0
     predictions = []
@@ -422,10 +484,13 @@ def _evaluate_reloaded(rows: list[dict[str, Any]], labels: dict[str, dict[str, A
         result = sequence_candidate.assess_candidate(
             row["request"], checkpoint_path=checkpoint,
             expected_checkpoint_sha256=checkpoint_sha, device="cuda",
-            allow_unpromoted_v9_prior=allow_unpromoted_v9_prior)
+            allow_unpromoted_v9_prior=allow_unpromoted_v9_prior,
+            input_profile=input_profile)
         if result.get("status") != "assessed":
             raise RuntimeError(f"production candidate assessment failed for {row['sample_id']!r}")
         evidence = result.get("evidence", {})
+        if evidence.get("model_state_profile") != input_profile:
+            raise RuntimeError("production assessor evaluated a different input profile")
         if evidence.get("checkpoint_sha256") != checkpoint_sha:
             raise RuntimeError("production candidate assessor loaded a different checkpoint")
         if evidence.get("frozen_backbone_state_sha256") != expected_frozen_sha:
@@ -470,7 +535,8 @@ def _evaluate_reloaded(rows: list[dict[str, Any]], labels: dict[str, dict[str, A
 
 def _input_hash_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Bounded provenance only: no dense attention tensors survive token audit."""
-    fields = ("sample_id", "source", "state_sha256", "state_text_sha256", "request_sha256",
+    fields = ("sample_id", "source", "stored_state_value_sha256", "state_sha256",
+              "state_text_sha256", "request_sha256",
               "label_sha256", "encoded_sha256", "input_ids_sha256", "attention_mask_sha256",
               "question_sha256", "options_sha256")
     return [{key: str(row.get(key, "")) for key in fields} for row in rows]
@@ -597,8 +663,11 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
                 "minimum_optimizer_steps", "patience_evaluations", "contrast_weight",
                 "contrast_margin", "epochs", "model_state_manifest_sha256",
                 "model_state_independent_audit_sha256"}
-    if not isinstance(config, dict) or set(config) != required:
-        raise ValueError(f"config must contain exactly: {', '.join(sorted(required))}")
+    if not isinstance(config, dict) or set(config) not in (required, required | {"input_profile"}):
+        raise ValueError(f"config must contain the frozen pilot fields, with optional input_profile")
+    input_profile = config.get("input_profile", INPUT_PROFILE_V2)
+    if input_profile not in (INPUT_PROFILE_V2, INPUT_PROFILE_V3):
+        raise ValueError("input_profile must be native_v2 or operation_facts_v3")
     if type(config["initialize_from_base"]) is not bool:
         raise ValueError("initialize_from_base must be a boolean")
     warm = config["warm_checkpoint"]
@@ -652,7 +721,7 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
                           "prediction": validation_targets[row["sample_id"]]["verdict"]}
                          for row in validation_rows])
 
-    bev, sequence_v2, sequence_candidate, source_root = _runtime(base_path, _source_root())
+    bev, sequence_v2, sequence_v3, sequence_candidate, source_root = _runtime(base_path, _source_root())
     import torch
     import torch.nn.functional as F
     import peft
@@ -670,7 +739,8 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
     if warm_path is not None:
         warm_sha = sha256_bytes(warm_path.read_bytes())
         warm_payload = torch.load(warm_path, map_location="cpu", weights_only=True)
-        warm_role = _validate_warm_payload(warm_payload, warm_sha, bev, sequence_v2, config)
+        warm_role = _validate_warm_payload(warm_payload, warm_sha, bev, sequence_v2, config,
+                                           input_profile=input_profile, sequence_v3=sequence_v3)
         if warm_role != "unpromoted_v9_prior":
             raise ValueError("the corrected pilot requires the exact unpromoted V9 step-64 warm prior")
     else:
@@ -679,14 +749,17 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
     decider, optimizer, lora_config, trainable_names = _load_model(
         bev, warm_path, torch, peft, config["learning_rate"], config["weight_decay"])
     frozen_sha = _module_tensor_sha256(decider.network.backbone)
+    profile_metadata = _profile_metadata(input_profile, sequence_v2, sequence_v3, config)
     warm_parity = _verify_warm_assessor_parity(
         validation_rows[0], decider, bev, sequence_candidate,
-        warm_path, warm_sha, frozen_sha)
+        warm_path, warm_sha, frozen_sha, input_profile=input_profile)
     train_samples, train_state_hashes = _tokenize_rows(
-        train_rows, train_targets, decider, bev, sequence_v2, sequence_candidate, source_root)
+        train_rows, train_targets, decider, bev, sequence_v2, sequence_candidate, source_root,
+        input_profile=input_profile, sequence_v3=sequence_v3)
     validation_samples, validation_state_hashes = _tokenize_rows(
-        validation_rows, validation_targets, decider, bev, sequence_v2, sequence_candidate, source_root)
-    # Resolve and audit the full runtime plus the vendored v2 projection once
+        validation_rows, validation_targets, decider, bev, sequence_v2, sequence_candidate, source_root,
+        input_profile=input_profile, sequence_v3=sequence_v3)
+    # Resolve and audit the full runtime plus the selected projection once
     # before any optimizer update begins.
     assert_gemini_module_origins(source_root)
     training_hash_file_sha = _write_input_hashes(output, "training-input-hashes.json", train_samples)
@@ -749,7 +822,8 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
         baseline = _evaluate_reloaded(validation_samples, validation_targets, warm_path,
                                       bev, sequence_v2, sequence_candidate, frozen_sha,
                                       decider.network,
-                                      allow_unpromoted_v9_prior=True)
+                                      allow_unpromoted_v9_prior=True,
+                                      input_profile=input_profile)
         baseline["selection_key"] = list(_pilot_selection_key(baseline["pilot_metrics"], 0))
         with (output / "baseline-v9-prior.json").open("x", encoding="utf-8", newline="\n") as stream:
             json.dump({"schema": "decision_factory_unpromoted_warm_baseline/1", **baseline}, stream,
@@ -790,12 +864,8 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             "warm_checkpoint_sha256": warm_sha,
             "warm_checkpoint_role": warm_role,
             "initialized_from_base": warm_path is None,
-            "model_state_schema": "sequence_guard_native_state_alpha/2",
-            "model_state_encoder_sha256": sequence_v2.NATIVE_STATE_V2_SHA256,
-            "model_state_transform_sha256": sequence_v2.ALPHA_BIND_V2_SHA256,
-            "model_state_manifest_sha256": config["model_state_manifest_sha256"].lower(),
-            "model_state_independent_audit_sha256": config["model_state_independent_audit_sha256"].lower(),
-            "training_input_mode": TRAINING_INPUT_MODE,
+            "input_profile": input_profile,
+            **profile_metadata,
             "lora_config": lora_config, "trainable_parameter_names": trainable_names,
             "warm_assessor_parity": warm_parity,
             "precision": "FP32 training and evaluation; CUDA TF32 disabled",
@@ -804,11 +874,11 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             "training_schedule_sha256": schedule_sha, "losses": losses,
         }
         checkpoint = _save_step(output, step=actual_steps, decider=decider, bev=bev,
-                                peft=peft, metadata=metadata, sequence_v2=sequence_v2)
+                                peft=peft, metadata=metadata)
         if actual_steps % config["eval_every_steps"] == 0 or actual_steps == config["max_optimizer_steps"]:
             metrics = _evaluate_reloaded(validation_samples, validation_targets, checkpoint,
                                          bev, sequence_v2, sequence_candidate, frozen_sha,
-                                         decider.network)
+                                         decider.network, input_profile=input_profile)
             entry = {"step": actual_steps, "checkpoint": checkpoint.name,
                      "checkpoint_sha256": sha256_bytes(checkpoint.read_bytes()), **metrics}
             history.append(entry)
@@ -848,7 +918,7 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
         checkpoint = output / f"step-{actual_steps:06d}.pt"
         metrics = _evaluate_reloaded(validation_samples, validation_targets, checkpoint,
                                      bev, sequence_v2, sequence_candidate, frozen_sha,
-                                     decider.network)
+                                     decider.network, input_profile=input_profile)
         entry = {"step": actual_steps, "checkpoint": checkpoint.name,
                  "checkpoint_sha256": sha256_bytes(checkpoint.read_bytes()), **metrics}
         history.append(entry)
@@ -870,6 +940,8 @@ def run(config_path: str | Path, *, train_states: str | Path, train_requests: st
             "three_nonimproving_evaluations_after_minimum" if early_stop else "step_cap_or_epochs")
     receipt = {
         "schema": "decision_factory_training_receipt/1",
+        "input_profile": input_profile,
+        "profile_metadata": profile_metadata,
         "status": "stopped" if stop_flag.exists() else ("passed" if selected is not None else "not_done"),
         "step_cap": config["max_optimizer_steps"], "completed_optimizer_steps": actual_steps,
         "training_examples_consumed": actual_examples,
