@@ -1,0 +1,26 @@
+{
+  "schema": "stage_b_runtime_freeze/1",
+  "baseline_commit": "561b591d5d92cfa71e451d87f19969a22352377d",
+  "commands": [
+    "python -m unittest discover -s tests -v"
+  ],
+  "result": "12 tests passed",
+  "scope": "CPU-only behavioral regressions; no model weights loaded",
+  "sha256": {
+    "README.md": "75894388c4410dcc08d82d55654c1465378025c8a26287fc590408a57979983b",
+    "docs/COMPLETION_PLAN.md": "7b818643d474a193b347f3f345f713fc055e0becdda353a1a624db950a12dfc5",
+    "pyproject.toml": "2d1959caf10b3f2fad6b02e2e1b3e289642421a51dcf881be0aa86d07c3df7da",
+    "run_sequence_demo.ps1": "f70f52c65524ad97d401769dcc43b4ba8ee7f769f03c43f46642d2b4c850711d",
+    "run_sequence_host_demo.ps1": "d152ebb2e65e86c9a3f3f2ee4b2d991fc74cc7d3b0e700ecbac7c9a4c312e7e2",
+    "src/decision_factory/runtime_guard/bev.py": "8565744e50a6286d40b18d5fcb0013ea31023bd553b903f9632be7f4d66c3210",
+    "src/decision_factory/runtime_guard/host.py": "16e761af98c91cc58b554584813351c25bc95525c6f539953cc396c7cd709f02",
+    "src/decision_factory/runtime_guard/qwen.py": "555d55e47d67a4d2ed55e47e5358443fd08bd640fac211048ee726a200a2aef5",
+    "src/decision_factory/runtime_guard/sequence.py": "7b031b71a4e003bf569df54e32670ce1f950b4ac4d5837ada2f0b6331ca7bc81",
+    "src/decision_factory/runtime_guard/sequence_cli.py": "39b41629914a7bea7e9e40fb252019e3b2c348a499babcca03657368d48708c9",
+    "src/decision_factory/runtime_guard/sequence_host.py": "94ffc4e0472a2d9771d2d91019d32b52698b7575bae006d2c3ec2b1932838975",
+    "src/decision_factory/runtime_guard/sequence_host_demo.py": "4963376503f0df18c753ba92b6d172e21c89f1171106c75f6abc9c76b3354299",
+    "src/decision_factory/runtime_guard/sequence_assess_legacy.py": "c8cc1a9b55c666ada69c6e19d5715989120a4d079f1b584a0c14563afded2401",
+    "tests/test_stage_b_runtime_contract.py": "0f46a694628842a6a1c7a1b10e8976aeb4082041dbfe8ef993b06e56762b8229",
+    "tests/stage-a-freeze.json": "a1e350921331b706b7e0f3e7c085cbae6ad24236b0cf555fec79de5444bcbe2b"
+  }
+}
